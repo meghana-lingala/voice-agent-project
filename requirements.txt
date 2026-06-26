@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-dotenv
+groq
+sarvamai
+sounddevice
+soundfile
+numpy
+python-multipart
+requests
+webrtcvad-wheels
+noisereduce

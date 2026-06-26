@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Secrets and Configs
+.env
+
+# Testing and Caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases, transaction history, and temporary runs
+transcript_history.json
+sample_results.json
+test_output.json
+diag.json
+transcript_history.json.bak
