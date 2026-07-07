@@ -23,3 +23,10 @@ sample_results.json
 test_output.json
 diag.json
 transcript_history.json.bak
+
+# Local databases, CSV exports, WAV recordings, and test logs
+*.db
+*.wav
+*.csv
+test_transcript_history.json
+

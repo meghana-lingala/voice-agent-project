@@ -5,17 +5,29 @@ import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
+import re
+import random
+import json
+import uuid
 
 import webrtcvad
 import stt_services
 from transcript_logger import log_transcript
+import database
+import llm_service
 
 app = FastAPI(title="Voice Agent Translation & Transcription API")
+
+@app.on_event("startup")
+async def startup_event():
+    database.init_db()
+
 
 @app.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
-    language_code: str = Form("en")
+    language_code: str = Form("en"),
+    session_id: str = Form("default_session")
 ):
     """
     Exposes a POST endpoint /transcribe that accepts an UploadFile binary audio payload
@@ -83,6 +95,59 @@ async def transcribe(
         transcript = result["transcript"]
         duration = result["telemetry"]["duration_seconds"]
 
+        # Parse tracking ID from transcript using case-insensitive regex SH\d{3}
+        match = re.search(r"SH\d{3}", transcript, re.IGNORECASE)
+        tracking_id = None
+        context_data = None
+        mode = "general"
+        if match:
+            tracking_id = match.group(0).upper()
+            context_data = database.get_shipment_details(tracking_id)
+            mode = "tracking"
+
+        # Generate response using OpenAI LLM
+        res_dict = llm_service.generate_response(
+            user_text=transcript,
+            session_id=session_id,
+            context_data=context_data,
+            mode=mode
+        )
+        ai_response = res_dict["ai_response"]
+        tool_calls = res_dict["tool_calls"]
+        new_session_id = None
+
+        if tool_calls:
+            for tool_call in tool_calls:
+                func_name = tool_call.function.name
+                if func_name == "create_new_shipment_record":
+                    try:
+                        args = json.loads(tool_call.function.arguments)
+                        pickup_address = args.get("pickup_address")
+                        destination_address = args.get("destination_address")
+                        package_weight = args.get("package_weight")
+                        pickup_time = args.get("pickup_time")
+                        
+                        # Generate unique random tracking ID SH + 3 digits
+                        while True:
+                            generated_id = f"SH{random.randint(100, 999)}"
+                            if not database.get_shipment_details(generated_id):
+                                tracking_id = generated_id
+                                break
+                                
+                        database.insert_new_order(
+                            tracking_id=tracking_id,
+                            p_addr=pickup_address,
+                            d_addr=destination_address,
+                            weight=package_weight,
+                            p_time=pickup_time
+                        )
+                        ai_response = f"I have successfully scheduled your shipment! Your new tracking ID is {tracking_id}."
+                    except Exception as e:
+                        ai_response = f"Error scheduling order: {str(e)}"
+                elif func_name == "end_current_session":
+                    new_session_id = str(uuid.uuid4())
+                    ai_response = "Thank you for using LogiRoute Express! Have a wonderful day, goodbye."
+
         # Save transactional details to the structured log file
         log_transcript(
             audio_filename=file.filename,
@@ -92,13 +157,30 @@ async def transcribe(
             language_code=logged_lang
         )
 
-        return {
+        # Log interaction to SQLite database
+        database.log_interaction(
+            session_id=session_id,
+            audio_file=file.filename,
+            transcript=transcript,
+            response=ai_response,
+            lang=logged_lang,
+            engine="openai/gpt-4o-mini",
+            latency=int(duration * 1000),
+            tracking_id=tracking_id
+        )
+
+        resp_payload = {
             "transcript": transcript,
+            "ai_response": ai_response,
             "telemetry": {
                 "duration_seconds": duration,
                 "engine_used": engine_used
             }
         }
+        if new_session_id:
+            resp_payload["new_session_id"] = new_session_id
+
+        return resp_payload
 
     except Exception as e:
         # Standardize 500 error propagation if external APIs fail

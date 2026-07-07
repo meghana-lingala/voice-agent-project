@@ -10,3 +10,4 @@ python-multipart
 requests
 webrtcvad-wheels
 noisereduce
+openai

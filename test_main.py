@@ -19,6 +19,16 @@ class TestMainAPI(unittest.TestCase):
         # Patch the LOG_FILE variable in transcript_logger to use our test log file
         self.log_file_patcher = patch('transcript_logger.LOG_FILE', self.test_log_file)
         self.log_file_patcher.start()
+
+        # Patch new database and LLM service functions to avoid live calls in test
+        self.gen_resp_patcher = patch('llm_service.generate_response', return_value={"ai_response": "Mocked AI Response", "tool_calls": None})
+        self.mock_gen_resp = self.gen_resp_patcher.start()
+
+        self.log_int_patcher = patch('database.log_interaction')
+        self.mock_log_int = self.log_int_patcher.start()
+
+        self.get_ship_patcher = patch('database.get_shipment_details', return_value=None)
+        self.mock_get_ship = self.get_ship_patcher.start()
         
         # Clean up any leftover test log file
         if os.path.exists(self.test_log_file):
@@ -38,8 +48,12 @@ class TestMainAPI(unittest.TestCase):
 
     def tearDown(self):
         self.log_file_patcher.stop()
+        self.gen_resp_patcher.stop()
+        self.log_int_patcher.stop()
+        self.get_ship_patcher.stop()
         if os.path.exists(self.test_log_file):
             os.remove(self.test_log_file)
+
 
     @patch('stt_services.transcribe_english')
     def test_transcribe_english_success(self, mock_transcribe_eng):
@@ -196,5 +210,72 @@ class TestMainAPI(unittest.TestCase):
             self.assertEqual(logs[0]["engine_used"], "Sarvam")
             self.assertEqual(logs[0]["language_code"], "Hindi")
 
+    @patch('stt_services.transcribe_english')
+    @patch('database.insert_new_order', return_value=True)
+    def test_transcribe_tool_call_create_shipment(self, mock_insert, mock_transcribe_eng):
+        mock_transcribe_eng.return_value = {
+            "transcript": "Create a shipment please.",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        # Mock tool call structure
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "create_new_shipment_record"
+        mock_tool_call.function.arguments = json.dumps({
+            "pickup_address": "Office A",
+            "destination_address": "Hub B",
+            "package_weight": "2 kg",
+            "pickup_time": "Tomorrow at 4 PM"
+        })
+        
+        self.mock_gen_resp.return_value = {
+            "ai_response": "",
+            "tool_calls": [mock_tool_call]
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_session_tool"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertIn("I have successfully scheduled your shipment! Your new tracking ID is SH", json_data["ai_response"])
+        mock_insert.assert_called_once()
+        args, kwargs = mock_insert.call_args
+        self.assertEqual(kwargs["p_addr"], "Office A")
+        self.assertEqual(kwargs["d_addr"], "Hub B")
+        self.assertEqual(kwargs["weight"], "2 kg")
+        self.assertEqual(kwargs["p_time"], "Tomorrow at 4 PM")
+
+    @patch('stt_services.transcribe_english')
+    def test_transcribe_tool_call_end_session(self, mock_transcribe_eng):
+        mock_transcribe_eng.return_value = {
+            "transcript": "Goodbye.",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "end_current_session"
+        mock_tool_call.function.arguments = "{}"
+        
+        self.mock_gen_resp.return_value = {
+            "ai_response": "",
+            "tool_calls": [mock_tool_call]
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_session_tool"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["ai_response"], "Thank you for using LogiRoute Express! Have a wonderful day, goodbye.")
+        self.assertIn("new_session_id", json_data)
+
 if __name__ == '__main__':
     unittest.main()
+

@@ -12,36 +12,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── VAD / Silence-Detection constants ─────────────────────────────────────────
-# These are all tuneable; the adaptive calibration is the key improvement.
-
-# Seconds of pre-roll audio read at stream-open to measure the ambient noise.
 NOISE_CALIBRATION_SECS  = 0.4
-
-# Dynamic threshold = ambient_rms * this multiplier.
-# 4× the noise floor means only frames that are significantly louder than
-# background hum / fan noise will pass the energy gate.
 NOISE_FLOOR_MULTIPLIER  = 4.0
-
-# Absolute floor so the threshold never collapses to near-zero in a very
-# quiet room (which would let background noise through).
 MIN_ENERGY_THRESHOLD    = 0.0008
-
-# Sliding-window smoothing: how many 30 ms frames to look back.
-# 10 frames = 300 ms of history.
 SPEECH_WINDOW_FRAMES    = 10
-
-# Fraction of the window that must be "active speech" for the window to be
-# considered speaking.  0.40 = need 4 out of 10 frames → bridges natural
-# inter-word pauses without letting noise spikes trigger false speech.
 SPEECH_ACTIVATION_RATIO = 0.40
-
-# Seconds of silence (post-speech) before stopping.
 POST_SPEECH_SILENCE_SEC = 2.0
-
-# Seconds of silence before any speech → give up waiting.
 INITIAL_SILENCE_SEC     = 5.0
-# ──────────────────────────────────────────────────────────────────────────────
-
 
 def calculate_rms(audio_data: np.ndarray) -> float:
     """Return the Root Mean Square amplitude of a 1-D audio array."""
@@ -49,23 +26,11 @@ def calculate_rms(audio_data: np.ndarray) -> float:
         return 0.0
     return float(np.sqrt(np.mean(np.square(audio_data))))
 
-
 def _calibrate_noise_floor(stream, blocksize: int, samplerate: int):
     """
     Read NOISE_CALIBRATION_SECS of audio from the already-open *stream* to
     measure the ambient noise RMS and derive a dynamic per-frame energy
     threshold that sits above the background noise floor.
-
-    Args:
-        stream    : an open sounddevice.InputStream
-        blocksize : samples per frame
-        samplerate: Hz
-
-    Returns:
-        (calib_frames, energy_threshold)
-        calib_frames     – list[np.ndarray] captured during calibration
-                           (included in the final recording so no audio is lost)
-        energy_threshold – float, the derived RMS threshold
     """
     try:
         # Warmup: discard the first 0.3 seconds of stream input to let hardware/driver stabilize
@@ -99,7 +64,6 @@ def _calibrate_noise_floor(stream, blocksize: int, samplerate: int):
         )
         return [], MIN_ENERGY_THRESHOLD
 
-
 def record_audio(
     duration: float = None,
     samplerate: int  = 16000,
@@ -107,37 +71,7 @@ def record_audio(
     device: int      = None,
 ) -> np.ndarray:
     """
-    Record mono audio using an adaptive, hybrid VAD pipeline.
-
-    ── Per 30 ms frame ──────────────────────────────────────────────────────
-    1. Adaptive energy gate
-       The energy threshold is calibrated at recording start by measuring
-       the ambient noise floor (fan hum, keyboard clicks, room noise).
-       Only frames whose RMS exceeds  noise_floor × 4  pass the gate.
-
-    2. WebRTC VAD (mode 2 – medium aggressiveness)
-       A frame must also pass WebRTC's voice-activity check.
-       Both gates must agree for a frame to count as speech.
-
-    3. Sliding-window smoothing (300 ms)
-       The last 10 frames are tracked; the window is counted as "speaking"
-       only when ≥ 40 % of frames are active speech.  This bridges natural
-       inter-word pauses (∼200 ms) without letting noise spikes keep the
-       recorder alive.
-
-    ── Termination rules ────────────────────────────────────────────────────
-    • 5 s of silence before any speech detected  → stop (diagnostic save)
-    • 2 s of silence after speech has been heard → stop (transcribe)
-    • 60 s hard cap (or explicit *duration* argument)
-
-    Args:
-        duration   : hard-cap in seconds (default 60)
-        samplerate : must be 8000 / 16000 / 32000 / 48000 Hz
-        channels   : must be 1 (mono)
-        device     : sounddevice input device index (None = system default)
-
-    Returns:
-        np.ndarray of shape (N, 1), dtype float32 – noise-reduced audio.
+    Record mono audio using an adaptive VAD pipeline starting on speech detection.
     """
     if samplerate not in (8000, 16000, 32000, 48000):
         raise ValueError(
@@ -160,14 +94,6 @@ def record_audio(
     max_sec    = duration if duration is not None else 60.0
     max_chunks = int(max_sec / frame_sec)
 
-    has_spoken      = False
-    silence_seconds = 0.0
-
-    # Pre-fill the sliding window with silence so we don't need a warm-up.
-    speech_window = collections.deque(maxlen=SPEECH_WINDOW_FRAMES)
-    for _ in range(SPEECH_WINDOW_FRAMES):
-        speech_window.append(False)
-
     try:
         with sd.InputStream(
             samplerate = samplerate,
@@ -189,56 +115,86 @@ def record_audio(
             else:
                 rms_history.append(energy_threshold)
 
-            # Include calibration frames in output (audio before press-Enter)
-            audio_chunks = list(calib_frames)
+            # ── Gate-Opening Wait Loop (Wait for Speech) ──────────────────
+            # Pre-roll lookback buffer (10 frames = 300 ms) to avoid clipping words
+            preroll_buffer = collections.deque(maxlen=10)
+            has_spoken = False
+            frames_read = 0
+            
+            while True:
+                # If a duration limit is specified, don't loop forever in tests/calls
+                if duration is not None and frames_read >= max_chunks:
+                    print("No speech detected. Saving audio for diagnostics...")
+                    break
 
-            # ── Main VAD loop ─────────────────────────────────────────────
-            for _ in range(max_chunks):
                 data, _ = stream.read(blocksize)
-                audio_chunks.append(data.copy())
-
-                flat = data.flatten()
-
-                # Gate 1: adaptive energy with rolling noise floor
-                frame_rms    = calculate_rms(flat)
+                frames_read += 1
+                preroll_buffer.append(data.copy())
+                
+                frame_rms = calculate_rms(data.flatten())
                 rms_history.append(frame_rms)
                 
-                # Dynamic noise floor is the 5th percentile of recent history
-                noise_floor  = np.percentile(list(rms_history), 5)
-                dynamic_threshold = max(noise_floor * 3.0, MIN_ENERGY_THRESHOLD)
-                above_energy = frame_rms > dynamic_threshold
-
-                # Gate 2: WebRTC VAD on 16-bit PCM
-                clipped    = np.clip(flat, -1.0, 1.0)
-                pcm_bytes  = (clipped * 32767).astype(np.int16).tobytes()
-                vad_speech = vad.is_speech(pcm_bytes, samplerate)
-
-                # Hybrid: both gates must agree
-                is_active = above_energy and vad_speech
-
-                # Sliding-window smoothing
-                speech_window.append(is_active)
-                smooth_speech = (
-                    sum(speech_window) / len(speech_window)
-                    >= SPEECH_ACTIVATION_RATIO
-                )
-
-                if smooth_speech:
-                    if not has_spoken:
-                        print("Speech detected!")
-                        has_spoken = True
-                    silence_seconds = 0.0
-                else:
-                    silence_seconds += frame_sec
-
-                # Termination
-                limit = POST_SPEECH_SILENCE_SEC if has_spoken else INITIAL_SILENCE_SEC
-                if silence_seconds >= limit:
-                    if not has_spoken:
-                        print("No speech detected. Saving audio for diagnostics...")
-                    else:
-                        print("Silence detected. Stopping recording...")
+                # Check if current RMS exceeds the calibrated energy threshold
+                if frame_rms > energy_threshold:
+                    print("[VAD] Speech started... Recording initialized.")
+                    has_spoken = True
                     break
+
+            if has_spoken:
+                # Start recording: include the pre-roll frames to capture the beginning of the speech
+                audio_chunks = list(preroll_buffer)
+                silence_seconds = 0.0
+                
+                # Pre-fill speech window with True as speech has started
+                speech_window = collections.deque(maxlen=SPEECH_WINDOW_FRAMES)
+                for _ in range(SPEECH_WINDOW_FRAMES):
+                    speech_window.append(True)
+
+                # ── Main VAD loop ─────────────────────────────────────────────
+                # Adjust remaining chunks
+                remaining_chunks = max_chunks - frames_read
+                for _ in range(max(0, remaining_chunks)):
+                    data, _ = stream.read(blocksize)
+                    audio_chunks.append(data.copy())
+
+                    flat = data.flatten()
+
+                    # Gate 1: adaptive energy with rolling noise floor
+                    frame_rms    = calculate_rms(flat)
+                    rms_history.append(frame_rms)
+                    
+                    # Dynamic noise floor is the 5th percentile of recent history
+                    noise_floor  = np.percentile(list(rms_history), 5)
+                    dynamic_threshold = max(noise_floor * 3.0, MIN_ENERGY_THRESHOLD)
+                    above_energy = frame_rms > dynamic_threshold
+
+                    # Gate 2: WebRTC VAD on 16-bit PCM
+                    clipped    = np.clip(flat, -1.0, 1.0)
+                    pcm_bytes  = (clipped * 32767).astype(np.int16).tobytes()
+                    vad_speech = vad.is_speech(pcm_bytes, samplerate)
+
+                    # Hybrid: both gates must agree
+                    is_active = above_energy and vad_speech
+
+                    # Sliding-window smoothing
+                    speech_window.append(is_active)
+                    smooth_speech = (
+                        sum(speech_window) / len(speech_window)
+                        >= SPEECH_ACTIVATION_RATIO
+                    )
+
+                    if smooth_speech:
+                        silence_seconds = 0.0
+                    else:
+                        silence_seconds += frame_sec
+
+                    # Termination (VAD silence limit check)
+                    if silence_seconds >= POST_SPEECH_SILENCE_SEC:
+                        print("Silence detected. Stopping recording...")
+                        break
+            else:
+                # No speech was detected during the wait loop
+                audio_chunks = list(preroll_buffer)
 
         if not audio_chunks:
             return np.zeros((0, 1), dtype='float32')
@@ -256,7 +212,6 @@ def record_audio(
         print(f"Error during audio recording: {exc}", file=sys.stderr)
         raise
 
-
 def is_silent(audio_data: np.ndarray, threshold: float = 0.01) -> bool:
     """Return True if the audio's RMS is below *threshold*."""
     rms = calculate_rms(audio_data)
@@ -265,7 +220,6 @@ def is_silent(audio_data: np.ndarray, threshold: float = 0.01) -> bool:
         return True
     return False
 
-
 def save_audio(audio_data: np.ndarray, file_path: str, samplerate: int = 16000):
     """Write a float32 numpy array to a WAV file."""
     try:
@@ -273,7 +227,6 @@ def save_audio(audio_data: np.ndarray, file_path: str, samplerate: int = 16000):
     except Exception as exc:
         print(f"Error saving audio file: {exc}", file=sys.stderr)
         raise
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -299,7 +252,6 @@ def main():
 
     save_audio(audio_data, args.output)
     print(f"Saved recording to {args.output}")
-
 
 if __name__ == "__main__":
     main()
