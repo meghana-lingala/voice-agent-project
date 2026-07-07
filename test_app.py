@@ -42,18 +42,15 @@ class TestAppClient(unittest.TestCase):
         next_file = app.get_next_filename(self.test_dir)
         self.assertEqual(os.path.basename(next_file), "sample_011.wav")
 
-    @patch('app.input')
+    @patch('app.time.sleep', side_effect=KeyboardInterrupt)
     @patch('app.audio_recorder.record_audio')
     @patch('app.audio_recorder.calculate_rms')
     @patch('app.audio_recorder.save_audio')
     @patch('requests.post')
-    def test_main_loop_success(self, mock_post, mock_save, mock_rms, mock_record, mock_input):
+    def test_main_loop_success(self, mock_post, mock_save, mock_rms, mock_record, mock_sleep):
         """Interactive client loop successfully records, saves, and transcribes."""
         import numpy as np
         from unittest.mock import mock_open
-        
-        # Inputs: Lang code "en", Dir choice "1" (default), Enter to record, then KeyboardInterrupt to exit loop
-        mock_input.side_effect = ["en", "1", "", KeyboardInterrupt()]
         
         mock_record.return_value = np.zeros((16000, 1))
         mock_rms.return_value = 0.05
@@ -79,16 +76,15 @@ class TestAppClient(unittest.TestCase):
         mock_save.assert_called_once()
         mock_post.assert_called_once()
 
-    @patch('app.input')
+    @patch('app.time.sleep', side_effect=KeyboardInterrupt)
     @patch('app.audio_recorder.record_audio')
     @patch('app.audio_recorder.calculate_rms')
     @patch('requests.post')
-    def test_main_loop_connection_error(self, mock_post, mock_rms, mock_record, mock_input):
+    def test_main_loop_connection_error(self, mock_post, mock_rms, mock_record, mock_sleep):
         """Interactive client loop elegantly catches backend offline connection errors."""
         import numpy as np
         from unittest.mock import mock_open
         
-        mock_input.side_effect = ["en", "1", "", KeyboardInterrupt()]
         mock_record.return_value = np.zeros((16000, 1))
         mock_rms.return_value = 0.05
         

@@ -148,10 +148,10 @@ class TestRecordAudio(unittest.TestCase):
 
         audio_recorder.record_audio(duration=10.0)
 
-        # Should stop after ~167 frames (5.0 s initial silence limit)
+        # Because energy remains below threshold, the wait loop times out and WebRTC VAD is never called
         call_count = mock_vad_instance.is_speech.call_count
-        self.assertGreaterEqual(call_count, 165)
-        self.assertLessEqual(call_count, 180)
+        self.assertEqual(call_count, 0)
+
 
     # ── Sliding-window bridges short inter-word pauses ────────────────────────
 
@@ -212,9 +212,9 @@ class TestRecordAudio(unittest.TestCase):
 
         audio_recorder.record_audio(duration=10.0)
 
+        # Because energy remains below threshold, the wait loop times out and WebRTC VAD is never called
         call_count = mock_vad_instance.is_speech.call_count
-        self.assertGreaterEqual(call_count, 165)
-        self.assertLessEqual(call_count, 180)
+        self.assertEqual(call_count, 0)
 
     # ── VAD aggressiveness ────────────────────────────────────────────────────
 
