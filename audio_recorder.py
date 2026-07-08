@@ -7,6 +7,7 @@ import sounddevice as sd
 import soundfile as sf
 import webrtcvad
 import noisereduce as nr
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -69,6 +70,7 @@ def record_audio(
     samplerate: int  = 16000,
     channels: int    = 1,
     device: int      = None,
+    timeout: float = None,
 ) -> np.ndarray:
     """
     Record mono audio using an adaptive VAD pipeline starting on speech detection.
@@ -121,11 +123,15 @@ def record_audio(
             has_spoken = False
             frames_read = 0
             
+            wait_start = time.time()
             while True:
                 # If a duration limit is specified, don't loop forever in tests/calls
                 if duration is not None and frames_read >= max_chunks:
                     print("No speech detected. Saving audio for diagnostics...")
                     break
+
+                if timeout is not None and (time.time() - wait_start) > timeout:
+                    raise TimeoutError("Inactivity timeout")
 
                 data, _ = stream.read(blocksize)
                 frames_read += 1

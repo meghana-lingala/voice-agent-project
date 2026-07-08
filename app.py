@@ -8,6 +8,7 @@ import uuid
 import time
 
 BACKEND_URL = "http://127.0.0.1:8000/transcribe"
+END_SESSION_URL = "http://127.0.0.1:8000/end_session"
 
 def get_next_filename(directory: str) -> str:
     """
@@ -37,12 +38,44 @@ def main():
     lang_code = "auto"
     target_dir = "samples/01_accuracy_benchmarks"
     
+    # Step 1: Add Inactivity State Tracking Variables
+    last_interaction_time = time.time()
+    warning_triggered = False
+    
     while True:
         try:
+            # Step 2: Implement the Two-Stage Idle Rule
+            elapsed = time.time() - last_interaction_time
+            
+            # Stage 2: Automatic Hard Exit (60 Seconds of Inactivity)
+            if elapsed > 60.0:
+                print("[SYSTEM] Inactivity limit reached. Terminating session safely due to timeout.")
+                try:
+                    # Dispatch a final non-blocking call to the server
+                    requests.post(END_SESSION_URL, data={"session_id": session_id}, timeout=5)
+                except Exception:
+                    pass
+                sys.exit(0)
+                
+            # Stage 1: The Warning Prompt (30 Seconds of Inactivity)
+            if elapsed > 30.0 and not warning_triggered:
+                print("[SYSTEM] Idle detected. Prompting user...")
+                print("Are you still there? Please let me know if you have any questions, otherwise I will close this session shortly.")
+                warning_triggered = True
+                # Recalculate elapsed after warning output
+                elapsed = time.time() - last_interaction_time
+            
             print(f"\n[SYSTEM] Microphone is live... Speak now. (Session: {session_id})")
+            
+            # Calculate remaining time before timeout transition
+            timeout_val = (60.0 - elapsed) if warning_triggered else (30.0 - elapsed)
+            
             try:
                 # Capture audio dynamically using VAD
-                audio_data = audio_recorder.record_audio()
+                audio_data = audio_recorder.record_audio(timeout=timeout_val)
+            except TimeoutError:
+                # Loop back to let the timeout rules process
+                continue
             except Exception as e:
                 print(f"[ERROR] Failed to record audio: {e}")
                 time.sleep(2.0)
@@ -76,17 +109,23 @@ def main():
                     
                 if response.status_code == 200:
                     res_data = response.json()
+                    transcript = res_data.get('transcript', '').strip()
                     
                     # Elegant mapping output
                     print("\n==========================================")
                     print("        TRANSCRIBE & AGENT SESSION        ")
                     print("==========================================")
-                    print(f" You (Speech)   : {res_data.get('transcript')}")
+                    print(f" You (Speech)   : {transcript}")
                     if "ai_response" in res_data:
                         print(f" Agent (AI)     : {res_data.get('ai_response')}")
                     print(f" Backend Engine : {res_data.get('telemetry', {}).get('engine_used')}")
                     print(f" Server Latency : {res_data.get('telemetry', {}).get('duration_seconds', 0.0):.3f} seconds")
                     print("==========================================\n")
+                    
+                    # Update interaction time if valid non-empty transcript is returned
+                    if transcript:
+                        last_interaction_time = time.time()
+                        warning_triggered = False
                     
                     if "new_session_id" in res_data:
                         old_session = session_id
@@ -94,6 +133,9 @@ def main():
                         print(f"[SYSTEM] Session rotation triggered by Agent!")
                         print(f"  Old Session: {old_session}")
                         print(f"  New Session: {session_id}\n")
+                        # Reset timeout state for the new session
+                        last_interaction_time = time.time()
+                        warning_triggered = False
                 else:
                     try:
                         detail = response.json().get("detail", response.text)

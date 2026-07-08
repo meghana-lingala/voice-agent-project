@@ -193,3 +193,30 @@ async def transcribe(
                 os.remove(temp_file_path)
             except Exception as cleanup_err:
                 print(f"Warning: Failed to delete temp file {temp_file_path}: {cleanup_err}")
+
+
+@app.post("/end_session")
+async def end_session(session_id: str = Form("default_session")):
+    """
+    Direct endpoint to trigger end_current_session() tool logic for context rotation on timeout.
+    """
+    ai_response = "Thank you for using LogiRoute Express! Have a wonderful day, goodbye."
+    new_session_id = str(uuid.uuid4())
+
+    # Log interaction to SQLite database
+    database.log_interaction(
+        session_id=session_id,
+        audio_file="timeout_signal",
+        transcript="[Timeout Session Close]",
+        response=ai_response,
+        lang="en",
+        engine="openai/gpt-4o-mini",
+        latency=0,
+        tracking_id=None
+    )
+
+    return {
+        "ai_response": ai_response,
+        "new_session_id": new_session_id
+    }
+

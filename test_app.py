@@ -1,6 +1,7 @@
 import unittest
 import os
 import shutil
+import sys
 from unittest.mock import patch, MagicMock
 import requests
 import app
@@ -97,6 +98,33 @@ class TestAppClient(unittest.TestCase):
                 with patch('app.audio_recorder.save_audio'):
                     app.main()
                     
+        mock_post.assert_called_once()
+
+    @patch('app.time.time')
+    @patch('app.audio_recorder.record_audio')
+    def test_main_loop_inactivity_warning(self, mock_record, mock_time):
+        """Client triggers idle warnings on 30 seconds of inactivity."""
+        start_time = 1000.0
+        mock_time.side_effect = [start_time, start_time + 35.0, start_time + 35.0, start_time + 35.0]
+        mock_record.side_effect = [TimeoutError("timeout"), KeyboardInterrupt()]
+        
+        app.main()
+        
+        mock_record.assert_any_call(timeout=25.0)
+
+    @patch('app.time.time')
+    @patch('requests.post')
+    @patch('sys.exit', side_effect=SystemExit)
+    @patch('app.audio_recorder.record_audio')
+    def test_main_loop_inactivity_exit(self, mock_record, mock_exit, mock_post, mock_time):
+        """Client triggers a safe exit on 60 seconds of inactivity."""
+        start_time = 1000.0
+        mock_time.side_effect = [start_time, start_time + 65.0]
+        
+        with self.assertRaises(SystemExit):
+            app.main()
+        
+        mock_exit.assert_called_once_with(0)
         mock_post.assert_called_once()
 
 if __name__ == "__main__":
