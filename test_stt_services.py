@@ -119,6 +119,7 @@ class TestTranscribeAuto(unittest.TestCase):
     @patch('stt_services._groq_auto')
     @patch('stt_services._sarvam_probe')
     def test_short_telugu_success(self, mock_probe, mock_groq_auto, _dur, _exists):
+        mock_groq_auto.return_value = ("నమస్కారం ఎలా ఉన్నారు", 0.5)
         mock_probe.side_effect = self._make_indic_side_effect(
             te_transcript="నమస్కారం ఎలా ఉన్నారు",  # contains Telugu words
             hi_transcript="Namaskaaram ela unnaru",
@@ -127,7 +128,7 @@ class TestTranscribeAuto(unittest.TestCase):
             result = stt_services.transcribe_auto("dummy.wav")
         self.assertEqual(result["telemetry"]["detected_language"], "Telugu")
         self.assertEqual(result["telemetry"]["engine_used"], "Sarvam")
-        mock_groq_auto.assert_not_called()
+        mock_groq_auto.assert_called_once()
         self.assertEqual(mock_probe.call_count, 2)
 
     # ── Short audio – Hindi detected ──
@@ -136,6 +137,7 @@ class TestTranscribeAuto(unittest.TestCase):
     @patch('stt_services._groq_auto')
     @patch('stt_services._sarvam_probe')
     def test_short_hindi_success(self, mock_probe, mock_groq_auto, _dur, _exists):
+        mock_groq_auto.return_value = ("नमस्ते कैसे हो आप", 0.5)
         mock_probe.side_effect = self._make_indic_side_effect(
             te_transcript="Namaskaaram kaise ho",
             hi_transcript="नमस्ते कैसे हो आप",   # contains Hindi words
@@ -144,7 +146,7 @@ class TestTranscribeAuto(unittest.TestCase):
             result = stt_services.transcribe_auto("dummy.wav")
         self.assertEqual(result["telemetry"]["detected_language"], "Hindi")
         self.assertEqual(result["telemetry"]["engine_used"], "Sarvam")
-        mock_groq_auto.assert_not_called()
+        mock_groq_auto.assert_called_once()
         self.assertEqual(mock_probe.call_count, 2)
 
     # ── Short audio – English ──
@@ -172,6 +174,7 @@ class TestTranscribeAuto(unittest.TestCase):
     @patch('stt_services._groq_auto')
     @patch('stt_services._sarvam_probe')
     def test_short_telugu_english_code_switch(self, mock_probe, mock_groq_auto, _dur, _exists):
+        mock_groq_auto.return_value = ("నమస్కారం నాకు coffee కావాలి", 0.5)
         mock_probe.side_effect = self._make_indic_side_effect(
             te_transcript="నమస్కారం నాకు coffee కావాలి",
             hi_transcript="Hello coffee needed",
@@ -188,6 +191,7 @@ class TestTranscribeAuto(unittest.TestCase):
     @patch('stt_services._groq_auto')
     @patch('stt_services._sarvam_probe')
     def test_short_hindi_english_code_switch(self, mock_probe, mock_groq_auto, _dur, _exists):
+        mock_groq_auto.return_value = ("नमस्ते मेरा name है राम", 0.5)
         mock_probe.side_effect = self._make_indic_side_effect(
             te_transcript="Hello mera naam",
             hi_transcript="नमस्ते मेरा name है राम",
@@ -277,6 +281,26 @@ class TestTranscribeAuto(unittest.TestCase):
              patch('stt_services.os.path.exists', return_value=True):
             with self.assertRaises(ValueError):
                 stt_services.transcribe_auto("dummy.wav")
+
+    @patch('stt_services.os.path.exists', return_value=True)
+    @patch('stt_services._get_audio_duration', return_value=5.0)
+    @patch('stt_services._sarvam_probe')
+    @patch('stt_services._groq_auto')
+    def test_short_indic_bypass_groq_shortcircuit(self, mock_groq_auto, mock_sarvam_probe, _dur, _exists):
+        # Telugu probe returns genuine word 'నేను', while auto-detect thinks it is English
+        mock_sarvam_probe.side_effect = [
+            ("నేను ఇక్కడ ఉన్నాను", 0.5, 0.9),  # te-IN: has genuine Telugu word
+            ("नमस्ते", 0.5, 0.9)  # hi-IN
+        ]
+        mock_groq_auto.return_value = ("I am here", 0.5)  # Latin characters only (is_indic = False)
+
+        with patch('builtins.open', mock_open(read_data=b"audio")):
+            result = stt_services.transcribe_auto("dummy.wav")
+            
+        # The result should bypass Groq's short-circuit and correctly route to Telugu
+        self.assertEqual(result["telemetry"]["detected_language"], "Telugu")
+        self.assertEqual(result["telemetry"]["engine_used"], "Sarvam")
+        self.assertEqual(result["transcript"], "నేను ఇక్కడ ఉన్నాను")
 
 
 if __name__ == '__main__':

@@ -29,6 +29,10 @@ class TestMainAPI(unittest.TestCase):
 
         self.get_ship_patcher = patch('database.get_shipment_details', return_value=None)
         self.mock_get_ship = self.get_ship_patcher.start()
+
+        # Patch the tts_service.generate_speech_b64 function
+        self.tts_patcher = patch('tts_service.generate_speech_b64', return_value="dGVzdCBhdWRpbw==")
+        self.mock_tts = self.tts_patcher.start()
         
         # Clean up any leftover test log file
         if os.path.exists(self.test_log_file):
@@ -51,6 +55,7 @@ class TestMainAPI(unittest.TestCase):
         self.gen_resp_patcher.stop()
         self.log_int_patcher.stop()
         self.get_ship_patcher.stop()
+        self.tts_patcher.stop()
         if os.path.exists(self.test_log_file):
             os.remove(self.test_log_file)
 
@@ -275,6 +280,136 @@ class TestMainAPI(unittest.TestCase):
         json_data = response.json()
         self.assertEqual(json_data["ai_response"], "Thank you for using LogiRoute Express! Have a wonderful day, goodbye.")
         self.assertIn("new_session_id", json_data)
+
+    @patch('stt_services.transcribe_english')
+    @patch('database.cancel_shipment_order', return_value="SUCCESS")
+    def test_transcribe_tool_call_cancel_shipment_success(self, mock_cancel, mock_transcribe_eng):
+        mock_transcribe_eng.return_value = {
+            "transcript": "Please cancel my shipment SH888",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "cancel_shipment_order"
+        mock_tool_call.function.arguments = json.dumps({"tracking_id": "SH888"})
+        
+        self.mock_gen_resp.return_value = {
+            "ai_response": "",
+            "tool_calls": [mock_tool_call]
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_session_cancel"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["ai_response"], "I have successfully cancelled shipment SH888.")
+        mock_cancel.assert_called_once_with("SH888")
+
+    @patch('stt_services.transcribe_english')
+    @patch('database.cancel_shipment_order', return_value="ALREADY_PICKED_UP")
+    def test_transcribe_tool_call_cancel_shipment_already_picked_up(self, mock_cancel, mock_transcribe_eng):
+        mock_transcribe_eng.return_value = {
+            "transcript": "Cancel SH123",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "cancel_shipment_order"
+        mock_tool_call.function.arguments = json.dumps({"tracking_id": "SH123"})
+        
+        self.mock_gen_resp.return_value = {
+            "ai_response": "",
+            "tool_calls": [mock_tool_call]
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_session_cancel"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["ai_response"], "I'm sorry, shipment SH123 cannot be cancelled because it has already been picked up.")
+        mock_cancel.assert_called_once_with("SH123")
+
+    @patch('stt_services.transcribe_english')
+    @patch('database.cancel_shipment_order', return_value="ALREADY_CANCELLED")
+    def test_transcribe_tool_call_cancel_shipment_already_cancelled(self, mock_cancel, mock_transcribe_eng):
+        mock_transcribe_eng.return_value = {
+            "transcript": "Cancel SH777",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "cancel_shipment_order"
+        mock_tool_call.function.arguments = json.dumps({"tracking_id": "SH777"})
+        
+        self.mock_gen_resp.return_value = {
+            "ai_response": "",
+            "tool_calls": [mock_tool_call]
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_session_cancel"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["ai_response"], "Shipment SH777 is already cancelled.")
+        mock_cancel.assert_called_once_with("SH777")
+
+    @patch('stt_services.transcribe_english')
+    @patch('database.cancel_shipment_order', return_value="NOT_FOUND")
+    def test_transcribe_tool_call_cancel_shipment_not_found(self, mock_cancel, mock_transcribe_eng):
+        mock_transcribe_eng.return_value = {
+            "transcript": "Cancel SH999",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "cancel_shipment_order"
+        mock_tool_call.function.arguments = json.dumps({"tracking_id": "SH999"})
+        
+        self.mock_gen_resp.return_value = {
+            "ai_response": "",
+            "tool_calls": [mock_tool_call]
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_session_cancel"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["ai_response"], "I couldn't find a shipment matching ID SH999 to cancel.")
+        mock_cancel.assert_called_once_with("SH999")
+
+    @patch('stt_services.transcribe_english')
+    def test_transcribe_includes_audio_b64(self, mock_transcribe_eng):
+        mock_transcribe_eng.return_value = {
+            "transcript": "Hello, is my package shipped?",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["audio_b64"], "dGVzdCBhdWRpbw==")
+        self.mock_tts.assert_called_once_with(text="Mocked AI Response", target_language_code="en")
 
 if __name__ == '__main__':
     unittest.main()

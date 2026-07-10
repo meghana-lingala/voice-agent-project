@@ -11,3 +11,4 @@ requests
 webrtcvad-wheels
 noisereduce
 openai
+pygame

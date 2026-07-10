@@ -1,5 +1,6 @@
 import os
 import time
+# pyrefly: ignore [missing-import]
 import soundfile as sf
 from dotenv import load_dotenv
 from groq import Groq
@@ -301,10 +302,11 @@ def transcribe_auto(file_path: str) -> dict:
     # SHORT AUDIO PATH (<= 30 s) — Concurrent Sarvam probes
     # ═════════════════════════════════════════════════════════════════════════
     if audio_duration <= SARVAM_MAX_DURATION_SEC:
-        # Run Sarvam probes in parallel
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        # Run Sarvam and Groq probes in parallel to minimize latency and maximize routing accuracy
+        with ThreadPoolExecutor(max_workers=3) as executor:
             te_future = executor.submit(_sarvam_probe, file_path, "te-IN")
             hi_future = executor.submit(_sarvam_probe, file_path, "hi-IN")
+            groq_future = executor.submit(_groq_auto, file_path, filename)
             
             # Fetch results
             te_text = te_dur = te_ratio = None
@@ -319,7 +321,34 @@ def transcribe_auto(file_path: str) -> dict:
             except Exception as exc:
                 print(f"[LID] Sarvam hi-IN probe failed: {exc}")
 
-        # Check for genuine Telugu
+            auto_text = auto_dur = None
+            try:
+                auto_text, auto_dur = groq_future.result()
+            except Exception as exc:
+                print(f"[LID] Groq auto probe failed: {exc}")
+
+        # 1. Short-circuit: Verify if the audio is actually Indic.
+        # If Groq auto-detection transcribed it and determined it does NOT contain Indic characters,
+        # we immediately route it as English. This prevents false positives from Sarvam 
+        # translating/hallucinating Telugu text from English speech.
+        is_indic = False
+        if auto_text:
+            is_indic = _is_any_indic(auto_text, threshold=0.15)
+        
+        has_telugu = te_text and _has_genuine_telugu(te_text)
+        has_hindi = hi_text and _has_genuine_hindi(hi_text)
+
+        if not is_indic and not (has_telugu or has_hindi) and auto_text is not None:
+            return {
+                "transcript": auto_text,
+                "telemetry": {
+                    "duration_seconds": auto_dur,
+                    "engine_used": "Groq",
+                    "detected_language": "English",
+                },
+            }
+
+        # 2. Check for genuine Telugu
         if te_text and _has_genuine_telugu(te_text):
             return {
                 "transcript": te_text,
@@ -330,7 +359,7 @@ def transcribe_auto(file_path: str) -> dict:
                 },
             }
 
-        # Check for genuine Hindi
+        # 3. Check for genuine Hindi
         if hi_text and _has_genuine_hindi(hi_text):
             return {
                 "transcript": hi_text,
@@ -341,39 +370,27 @@ def transcribe_auto(file_path: str) -> dict:
                 },
             }
 
-        # Fallback: check if Groq auto-detect confirms Indic
-        auto_text, auto_dur = _groq_auto(file_path, filename)
-        if _is_any_indic(auto_text, threshold=0.15):
-            te_ratio_val = te_ratio if te_ratio is not None else 0.0
-            hi_ratio_val = hi_ratio if hi_ratio is not None else 0.0
-            if te_ratio_val >= hi_ratio_val:
-                return {
-                    "transcript": te_text if te_text else auto_text,
-                    "telemetry": {
-                        "duration_seconds" : te_dur if te_dur else auto_dur,
-                        "engine_used"      : "Sarvam" if te_text else "Groq",
-                        "detected_language": "Telugu",
-                    },
-                }
-            else:
-                return {
-                    "transcript": hi_text if hi_text else auto_text,
-                    "telemetry": {
-                        "duration_seconds" : hi_dur if hi_dur else auto_dur,
-                        "engine_used"      : "Sarvam" if hi_text else "Groq",
-                        "detected_language": "Hindi",
-                    },
-                }
-
-        # Otherwise, English
-        return {
-            "transcript": auto_text,
-            "telemetry": {
-                "duration_seconds" : auto_dur,
-                "engine_used"      : "Groq",
-                "detected_language": "English",
-            },
-        }
+        # 4. Fallback matching using script ratios
+        te_ratio_val = te_ratio if te_ratio is not None else 0.0
+        hi_ratio_val = hi_ratio if hi_ratio is not None else 0.0
+        if te_ratio_val >= hi_ratio_val:
+            return {
+                "transcript": te_text if te_text else auto_text,
+                "telemetry": {
+                    "duration_seconds" : te_dur if te_dur else auto_dur,
+                    "engine_used"      : "Sarvam" if te_text else "Groq",
+                    "detected_language": "Telugu",
+                },
+            }
+        else:
+            return {
+                "transcript": hi_text if hi_text else auto_text,
+                "telemetry": {
+                    "duration_seconds" : hi_dur if hi_dur else auto_dur,
+                    "engine_used"      : "Sarvam" if hi_text else "Groq",
+                    "detected_language": "Hindi",
+                },
+            }
 
     # ═════════════════════════════════════════════════════════════════════════
     # LONG AUDIO PATH (> 30 s) — Concurrent Groq forced probes

@@ -76,7 +76,7 @@ def init_db():
         finally:
             conn.close()
 
-def get_shipment_details(tracking_id: str) -> dict or None:
+def get_shipment_details(tracking_id: str) -> dict | None:
     """
     Queries the shipment_tracking table for the given tracking_id.
     Returns a dictionary of column names and values, or None if not found.
@@ -174,4 +174,38 @@ def get_conversation_history(session_id: str, limit: int = 10) -> list:
             return history[-limit:]
         finally:
             conn.close()
+
+
+def cancel_shipment_order(tracking_id: str) -> str:
+    """
+    Cancels a shipment order if the status is 'Created'.
+    Returns:
+    - 'NOT_FOUND' if tracking_id does not exist
+    - 'ALREADY_CANCELLED' if status is exactly 'Cancelled'
+    - 'SUCCESS' if status is exactly 'Created' (status updated to 'Cancelled')
+    - 'ALREADY_PICKED_UP' for any other status
+    """
+    t_id = tracking_id.strip().upper()
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT status FROM shipment_tracking WHERE UPPER(tracking_id) = ?", (t_id,))
+            row = cursor.fetchone()
+            if not row:
+                return "NOT_FOUND"
+            status = row["status"]
+            if status == "Cancelled":
+                return "ALREADY_CANCELLED"
+            if status == "Created":
+                cursor.execute("UPDATE shipment_tracking SET status = 'Cancelled' WHERE UPPER(tracking_id) = ?", (t_id,))
+                conn.commit()
+                return "SUCCESS"
+            return "ALREADY_PICKED_UP"
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
+
 

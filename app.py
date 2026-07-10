@@ -6,6 +6,8 @@ import requests
 import audio_recorder
 import uuid
 import time
+import base64
+import pygame
 
 BACKEND_URL = "http://127.0.0.1:8000/transcribe"
 END_SESSION_URL = "http://127.0.0.1:8000/end_session"
@@ -31,6 +33,9 @@ def main():
     print("==================================================")
     print("      Voice Agent Interactive STT Client Panel    ")
     print("==================================================")
+    
+    # Initialize pygame mixer
+    pygame.mixer.init()
     
     session_id = str(uuid.uuid4())
     print(f"[SYSTEM] Initialized unique Session ID: {session_id}")
@@ -121,6 +126,27 @@ def main():
                     print(f" Backend Engine : {res_data.get('telemetry', {}).get('engine_used')}")
                     print(f" Server Latency : {res_data.get('telemetry', {}).get('duration_seconds', 0.0):.3f} seconds")
                     print("==========================================\n")
+                    
+                    # Automated hands-free playback of agent's audio response
+                    audio_b64 = res_data.get("audio_b64")
+                    if audio_b64:
+                        try:
+                            audio_bytes = base64.b64decode(audio_b64)
+                            output_active_path = "response_active.wav"
+                            with open(output_active_path, "wb") as audio_file:
+                                audio_file.write(audio_bytes)
+                            
+                            pygame.mixer.music.load(output_active_path)
+                            pygame.mixer.music.play()
+                            
+                            # Blocking check loop to wait until audio completes playback
+                            while pygame.mixer.music.get_busy():
+                                time.sleep(0.1)
+                                
+                            pygame.mixer.music.stop()
+                            pygame.mixer.music.unload()
+                        except Exception as play_err:
+                            print(f"[ERROR] Failed playing audio response: {play_err}")
                     
                     # Update interaction time if valid non-empty transcript is returned
                     if transcript:

@@ -125,5 +125,53 @@ class TestDatabase(unittest.TestCase):
         
         conn.close()
 
+    def test_cancel_shipment_order_success(self):
+        # Insert a new order which starts as 'Created'
+        database.insert_new_order(
+            tracking_id="SH888",
+            p_addr="Start Address",
+            d_addr="End Address",
+            weight="5 kg",
+            p_time="Now"
+        )
+        
+        # Cancel order
+        result = database.cancel_shipment_order("SH888")
+        self.assertEqual(result, "SUCCESS")
+        
+        # Verify status is updated to 'Cancelled'
+        details = database.get_shipment_details("SH888")
+        self.assertEqual(details["status"], "Cancelled")
+
+    def test_cancel_shipment_order_already_picked_up(self):
+        # Try to cancel SH123 (status is 'In Transit')
+        result = database.cancel_shipment_order("SH123")
+        self.assertEqual(result, "ALREADY_PICKED_UP")
+        
+        # Verify status remained unchanged
+        details = database.get_shipment_details("SH123")
+        self.assertEqual(details["status"], "In Transit")
+
+    def test_cancel_shipment_order_already_cancelled(self):
+        database.insert_new_order(
+            tracking_id="SH777",
+            p_addr="Address A",
+            d_addr="Address B",
+            weight="1 kg",
+            p_time="Later"
+        )
+        
+        # Cancel once
+        result1 = database.cancel_shipment_order("SH777")
+        self.assertEqual(result1, "SUCCESS")
+        
+        # Cancel again
+        result2 = database.cancel_shipment_order("SH777")
+        self.assertEqual(result2, "ALREADY_CANCELLED")
+
+    def test_cancel_shipment_order_not_found(self):
+        result = database.cancel_shipment_order("SH999")
+        self.assertEqual(result, "NOT_FOUND")
+
 if __name__ == '__main__':
     unittest.main()
