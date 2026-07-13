@@ -302,6 +302,39 @@ class TestTranscribeAuto(unittest.TestCase):
         self.assertEqual(result["telemetry"]["engine_used"], "Sarvam")
         self.assertEqual(result["transcript"], "నేను ఇక్కడ ఉన్నాను")
 
+    @patch('stt_services.os.path.exists', return_value=True)
+    @patch('stt_services._get_audio_duration', return_value=10.0)
+    @patch('stt_services._groq_auto')
+    @patch('stt_services._sarvam_probe')
+    def test_latin_script_hindi_classification(self, mock_probe, mock_groq_auto, _dur, _exists):
+        # Sarvam probes fail due to network error (returning Exception)
+        mock_probe.side_effect = Exception("Sarvam network error")
+        # Groq returns Latin-script phonetic Hindi
+        mock_groq_auto.return_value = ("meri order kidhar hai", 0.5)
+        
+        with patch('builtins.open', mock_open(read_data=b"audio")):
+            result = stt_services.transcribe_auto("dummy.wav")
+            
+        self.assertEqual(result["telemetry"]["detected_language"], "Hindi")
+        self.assertEqual(result["telemetry"]["engine_used"], "Groq")
+        self.assertEqual(result["transcript"], "meri order kidhar hai")
+
+    @patch('stt_services.os.path.exists', return_value=True)
+    @patch('stt_services._get_audio_duration', return_value=10.0)
+    @patch('stt_services._groq_auto')
+    @patch('stt_services._sarvam_probe')
+    def test_latin_script_telugu_classification(self, mock_probe, mock_groq_auto, _dur, _exists):
+        # Sarvam probes fail due to network error (returning Exception)
+        mock_probe.side_effect = Exception("Sarvam network error")
+        # Groq returns Latin-script phonetic Telugu
+        mock_groq_auto.return_value = ("mari order ekkada undi", 0.5)
+        
+        with patch('builtins.open', mock_open(read_data=b"audio")):
+            result = stt_services.transcribe_auto("dummy.wav")
+            
+        self.assertEqual(result["telemetry"]["detected_language"], "Telugu")
+        self.assertEqual(result["telemetry"]["engine_used"], "Groq")
+        self.assertEqual(result["transcript"], "mari order ekkada undi")
 
 if __name__ == '__main__':
     unittest.main()

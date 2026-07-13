@@ -411,6 +411,130 @@ class TestMainAPI(unittest.TestCase):
         self.assertEqual(json_data["audio_b64"], "dGVzdCBhdWRpbw==")
         self.mock_tts.assert_called_once_with(text="Mocked AI Response", target_language_code="en")
 
+    @patch('database.get_session_language', return_value="Telugu")
+    @patch('stt_services.transcribe_indic')
+    @patch('stt_services.transcribe_auto')
+    def test_transcribe_sticky_language_bypass(self, mock_transcribe_auto, mock_transcribe_indic, mock_get_lang):
+        mock_transcribe_indic.return_value = {
+            "transcript": "నమస్కారం",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "auto", "session_id": "sticky_session_123"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["transcript"], "నమస్కారం")
+        
+        # Bypassed auto-detect and hit Sarvam Telugu directly
+        mock_transcribe_indic.assert_called_once()
+        self.assertEqual(mock_transcribe_indic.call_args[1]["language_code"], "te-IN")
+        mock_transcribe_auto.assert_not_called()
+
+    @patch('database.get_shipment_details')
+    @patch('stt_services.transcribe_english')
+    def test_transcribe_tracking_bypass_english(self, mock_transcribe_eng, mock_get_details):
+        mock_get_details.return_value = {
+            "tracking_id": "SH123",
+            "status": "In Transit",
+            "current_location": "Hyderabad"
+        }
+        mock_transcribe_eng.return_value = {
+            "transcript": "Status of SH123",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["ai_response"], "Your shipment SH123 is currently In Transit at the Hyderabad hub.")
+        self.mock_gen_resp.assert_not_called()
+
+    @patch('database.get_shipment_details')
+    @patch('stt_services.transcribe_indic')
+    def test_transcribe_tracking_bypass_telugu(self, mock_transcribe_indic, mock_get_details):
+        mock_get_details.return_value = {
+            "tracking_id": "SH123",
+            "status": "In Transit",
+            "current_location": "Hyderabad"
+        }
+        mock_transcribe_indic.return_value = {
+            "transcript": "ఎస్ హెచ్ వన్ టూ త్రీ స్థితి ఏమిటి",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "te-IN"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["ai_response"], "మీ రవాణా పొట్లం పొడవునా చూస్తే, ఐడి SH123 ప్రస్తుతం హైదరాబాద్ లో ఇన్ ట్రాన్సిట్ లో ఉంది.")
+        self.mock_gen_resp.assert_not_called()
+
+    @patch('database.get_session_language', return_value="Telugu")
+    @patch('database.get_shipment_details')
+    @patch('stt_services.transcribe_indic')
+    def test_transcribe_filler_word_preserves_telugu_lock(self, mock_transcribe_indic, mock_get_details, mock_get_lang):
+        mock_get_details.return_value = {
+            "tracking_id": "SH456",
+            "status": "Out for Delivery",
+            "current_location": "Ghatkesar"
+        }
+        mock_transcribe_indic.return_value = {
+            "transcript": "Hello SH456",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "auto", "session_id": "sticky_telugu_session"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        
+        # Assert response is in Telugu matching template
+        self.assertEqual(json_data["ai_response"], "మీ రవాణా పొట్లం పొడవునా చూస్తే, ఐడి SH456 ప్రస్తుతం ఘట్కేసర్ లో డెలివరీ కోసం అవుట్ లో ఉంది.")
+        self.mock_gen_resp.assert_not_called()
+        self.mock_tts.assert_called_once_with(text=json_data["ai_response"], target_language_code="te-IN")
+
+    @patch('database.get_session_language', return_value="Telugu")
+    @patch('stt_services.transcribe_indic')
+    def test_transcribe_thank_you_bypasses_llm_in_telugu(self, mock_transcribe_indic, mock_get_lang):
+        mock_transcribe_indic.return_value = {
+            "transcript": "థాంక్యూ",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "auto", "session_id": "sticky_telugu_session"}
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        
+        # Assert response is exactly the Telugu closing template response
+        self.assertEqual(json_data["ai_response"], "మీకు స్వాగతం! మీకు సహాయం చేయడానికి సంతోషిస్తున్నాను. ఇంకా ఏదైనా సహాయం కావాలా?")
+        self.mock_gen_resp.assert_not_called()
+        self.mock_tts.assert_called_once_with(text=json_data["ai_response"], target_language_code="te-IN")
+
 if __name__ == '__main__':
     unittest.main()
+
+
 

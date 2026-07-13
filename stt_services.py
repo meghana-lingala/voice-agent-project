@@ -82,6 +82,20 @@ HINDI_CONFIDENT_WORDS = frozenset({
 })
 
 
+LATIN_HINDI_WORDS = frozenset({
+    "kidhar", "kethar", "kadar", "kya", "karna", "karo", "mera", "meri", "mery", "apka", 
+    "aapka", "hoga", "tha", "raha", "chahiye", "bol", "bolo", "batao", "sunte", "sun", 
+    "kaha", "kahan", "kab", "kaise", "kon", "kaun", "bhai", "namaste", "shukriya",
+    "dhanyawad", "dhanyabad", "hai", "he", "shuru", "kariye", "karna", "krna"
+})
+
+LATIN_TELUGU_WORDS = frozenset({
+    "ekkada", "daggara", "undi", "unnadu", "chesanu", "chesali", "nenu", "mari", "kavali",
+    "ekada", "lodu", "matladu", "cheppu", "enti", "cheyali", "naku", "maku", "meru", "miaku",
+    "namaskaram", "dhanyavadalu", "avunu", "kadu", "ledu", "undha", "cheyandi"
+})
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 def _detect_indic_script_ratio(text: str) -> float:
@@ -188,6 +202,7 @@ def _groq_forced(file_path: str, filename: str, lang_code: str) -> tuple:
             file     = (filename, fh),
             model    = "whisper-large-v3-turbo",
             language = lang_code,
+            prompt   = "The user is providing a shipment tracking ID starting with the characters SH followed by digits. Example: SH123, SH456, SH789. Do not confuse SH with 'Hi' or generic words.",
         )
     return resp.text, time.perf_counter() - start
 
@@ -202,6 +217,7 @@ def _groq_auto(file_path: str, filename: str) -> tuple:
         resp = groq_client.audio.transcriptions.create(
             file  = (filename, fh),
             model = "whisper-large-v3-turbo",
+            prompt = "The user is providing a shipment tracking ID starting with the characters SH followed by digits. Example: SH123, SH456, SH789. Do not confuse SH with 'Hi' or generic words.",
         )
     return resp.text, time.perf_counter() - start
 
@@ -228,6 +244,7 @@ def transcribe_english(file_path: str) -> dict:
         response = groq_client.audio.transcriptions.create(
             file  = (filename, f),
             model = "whisper-large-v3-turbo",
+            prompt = "The user is providing a shipment tracking ID starting with the characters SH followed by digits. Example: SH123, SH456, SH789. Do not confuse SH with 'Hi' or generic words.",
         )
         duration = time.perf_counter() - start
 
@@ -258,11 +275,22 @@ def transcribe_indic(file_path: str, language_code: str = "hi-IN") -> dict:
     filename = os.path.basename(file_path)
     with open(file_path, "rb") as f:
         start = time.perf_counter()
-        response = sarvam_client.speech_to_text.transcribe(
-            file          = (filename, f),
-            language_code = language_code,
-            model         = "saaras:v3",
-        )
+        
+        # Resilient transcription retry loop
+        for attempt in range(3):
+            try:
+                f.seek(0)
+                response = sarvam_client.speech_to_text.transcribe(
+                    file          = (filename, f),
+                    language_code = language_code,
+                    model         = "saaras:v3",
+                )
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise e
+                time.sleep(0.25 * (2 ** attempt))
+                
         duration = time.perf_counter() - start
 
     return {
@@ -339,6 +367,30 @@ def transcribe_auto(file_path: str) -> dict:
         has_hindi = hi_text and _has_genuine_hindi(hi_text)
 
         if not is_indic and not (has_telugu or has_hindi) and auto_text is not None:
+            # Check for Latin-script phonetic Hindi or Telugu words
+            words = {w.strip('.,!?:;()[]').lower() for w in auto_text.split()}
+            hi_matches = words & LATIN_HINDI_WORDS
+            te_matches = words & LATIN_TELUGU_WORDS
+            
+            if hi_matches and len(hi_matches) >= 1:
+                return {
+                    "transcript": auto_text,
+                    "telemetry": {
+                        "duration_seconds": auto_dur,
+                        "engine_used": "Groq",
+                        "detected_language": "Hindi",
+                    },
+                }
+            elif te_matches and len(te_matches) >= 1:
+                return {
+                    "transcript": auto_text,
+                    "telemetry": {
+                        "duration_seconds": auto_dur,
+                        "engine_used": "Groq",
+                        "detected_language": "Telugu",
+                    },
+                }
+            
             return {
                 "transcript": auto_text,
                 "telemetry": {

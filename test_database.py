@@ -173,5 +173,40 @@ class TestDatabase(unittest.TestCase):
         result = database.cancel_shipment_order("SH999")
         self.assertEqual(result, "NOT_FOUND")
 
+    def test_get_session_language(self):
+        # By default, non-existent session should return None
+        lang = database.get_session_language("non_existent_session")
+        self.assertIsNone(lang)
+        
+        # Log an interaction with English language
+        database.log_interaction(
+            session_id="session_test_lang",
+            audio_file="speech.wav",
+            transcript="Hello",
+            response="Hi",
+            lang="English",
+            engine="openai/gpt-4o-mini",
+            latency=100
+        )
+        
+        # Retrieve it and verify it returns "English"
+        lang = database.get_session_language("session_test_lang")
+        self.assertEqual(lang, "English")
+        
+        # Log a subsequent interaction with Telugu language
+        database.log_interaction(
+            session_id="session_test_lang",
+            audio_file="speech2.wav",
+            transcript="నమస్కారం",
+            response="నమస్కారం",
+            lang="Telugu",
+            engine="openai/gpt-4o-mini",
+            latency=100
+        )
+        
+        # Retrieve it and verify it returns the most recent one ("Telugu")
+        lang = database.get_session_language("session_test_lang")
+        self.assertEqual(lang, "Telugu")
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 from sarvamai import SarvamAI
 from dotenv import load_dotenv
 
@@ -39,18 +40,22 @@ def generate_speech_b64(text: str, target_language_code: str = "en-IN") -> str |
         lang = "en-IN"
 
     with tts_lock:
-        try:
-            response = sarvam_client.text_to_speech.convert(
-                text=text,
-                target_language_code=lang,
-                model="bulbul:v3",
-                speaker="shubh"
-            )
-            if response and response.audios:
-                return response.audios[0]
-            else:
-                print("[TTS] Empty response received from Sarvam AI TTS.")
-                return None
-        except Exception as e:
-            print(f"[TTS] Error calling Sarvam AI TTS: {e}")
-            return None
+        # Resilient synthesis retry loop
+        for attempt in range(3):
+            try:
+                response = sarvam_client.text_to_speech.convert(
+                    text=text,
+                    target_language_code=lang,
+                    model="bulbul:v3",
+                    speaker="shubh"
+                )
+                if response and response.audios:
+                    return response.audios[0]
+                else:
+                    print(f"[TTS] Empty response received from Sarvam AI TTS (attempt {attempt + 1}).")
+            except Exception as e:
+                print(f"[TTS] Error calling Sarvam AI TTS (attempt {attempt + 1}): {e}")
+                if attempt == 2:
+                    return None
+            time.sleep(0.25 * (2 ** attempt))
+        return None

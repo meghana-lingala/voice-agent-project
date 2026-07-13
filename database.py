@@ -208,4 +208,23 @@ def cancel_shipment_order(tracking_id: str) -> str:
         finally:
             conn.close()
 
-
+def get_session_language(session_id: str) -> str | None:
+    """
+    Retrieves the last resolved language string for the given session_id from conversation_logs.
+    Inside a threading Lock context, query the table and return the value stored in detected_language.
+    """
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT detected_language FROM conversation_logs
+                WHERE session_id = ?
+                ORDER BY id DESC LIMIT 1
+            """, (session_id,))
+            row = cursor.fetchone()
+            if row and row["detected_language"]:
+                return row["detected_language"]
+            return None
+        finally:
+            conn.close()

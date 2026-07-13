@@ -1,4 +1,117 @@
 import os
+def normalize_indic_alphanumerics(text: str) -> str:
+    """
+    Normalizes Telugu and Hindi phonetic letters and digits to standard English alpha-numerics.
+    """
+    if not text:
+        return text
+
+    # Base dictionary for mapping
+    mapping = {
+        # Letter replacements
+        "ఎస్ హెచ్": "SH",
+        "एस एच": "SH",
+        "एसएच": "SH",
+        
+        # Telugu digits
+        "వన్": "1",
+        "టూ": "2",
+        "త్రీ": "3",
+        "ఫోర్": "4",
+        "ఫైవ్": "5",
+        
+        # Hindi digits
+        "वन": "1",
+        "टू": "2",
+        "थ्री": "3",
+        "फोर": "4",
+        "फाइव": "5"
+    }
+
+    normalized = text
+    # Apply replacements (longest patterns first to avoid partial matching issues)
+    for pattern in sorted(mapping.keys(), key=len, reverse=True):
+        normalized = normalized.replace(pattern, mapping[pattern])
+
+    # Strip spaces between SH and digits (e.g. "SH 123" -> "SH123")
+    normalized = re.sub(r'\bSH\s+(\d+)\b', r'SH\1', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\bSH\s+([a-zA-Z0-9]+)\b', r'SH\1', normalized, flags=re.IGNORECASE)
+
+    return normalized
+
+def get_localized_tracking_response(tracking_id: str, status: str, location: str, lang_key: str) -> str:
+    """
+    Builds the localized tracking response based on template format.
+    """
+    # Status localized translations
+    status_map = {
+        "te": {
+            "in transit": "ఇన్ ట్రాన్సిట్",
+            "out for delivery": "డెలివరీ కోసం అవుట్",
+            "delayed": "ఆలస్యం",
+            "cancelled": "రద్దు",
+            "created": "సృష్టించబడింది"
+        },
+        "hi": {
+            "in transit": "इन ट्रांजिट",
+            "out for delivery": "डिलीवरी के लिए बाहर",
+            "delayed": "देरी",
+            "cancelled": "रद्द",
+            "created": "तैयार"
+        },
+        "en": {
+            "in transit": "In Transit",
+            "out for delivery": "Out for Delivery",
+            "delayed": "Delayed",
+            "cancelled": "Cancelled",
+            "created": "Created"
+        }
+    }
+
+    # Location localized translations
+    location_map = {
+        "te": {
+            "hyderabad": "హైదరాబాద్",
+            "ghatkesar": "ఘట్కేసర్",
+            "delhi hub": "ఢిల్లీ హబ్",
+            "origin depot": "ఆరిజిన్ డిపో"
+        },
+        "hi": {
+            "hyderabad": "हैदराबाद",
+            "ghatkesar": "घटकेसर",
+            "delhi hub": "दिल्ली हब",
+            "origin depot": "ओरिजिन डिपो"
+        },
+        "en": {
+            "hyderabad": "Hyderabad",
+            "ghatkesar": "Ghatkesar",
+            "delhi hub": "Delhi Hub",
+            "origin depot": "Origin Depot"
+        }
+    }
+
+    # Normalize inputs
+    status_key = status.lower()
+    location_key = location.lower()
+    
+    # Resolve correct language code (e.g. te-IN or te -> te)
+    l_key = "en"
+    if "te" in lang_key.lower() or "telugu" in lang_key.lower():
+        l_key = "te"
+    elif "hi" in lang_key.lower() or "hindi" in lang_key.lower():
+        l_key = "hi"
+
+    # Map status and location
+    mapped_status = status_map[l_key].get(status_key, status)
+    mapped_location = location_map[l_key].get(location_key, location)
+
+    if l_key == "te":
+        return f"మీ రవాణా పొట్లం పొడవునా చూస్తే, ఐడి {tracking_id} ప్రస్తుతం {mapped_location} లో {mapped_status} లో ఉంది."
+    elif l_key == "hi":
+        return f"आपका शिपमेंट {tracking_id} वर्तमान में {mapped_location} में {mapped_status} में है। "
+    else:
+        return f"Your shipment {tracking_id} is currently {mapped_status} at the {mapped_location} hub."
+
 import io
 import tempfile
 import numpy as np
@@ -61,6 +174,238 @@ def get_language_from_code_or_name(lang: str) -> str:
     if "hi" in lang_lower or "hindi" in lang_lower:
         return "hi"
     return "en"
+
+UNIVERSAL_FILLER_WORDS = {"hello", "hi", "hey", "ok", "okay", "thank you", "thanks", "bye", "goodbye", "yes", "no", "sure"}
+
+def detect_language_override(text: str) -> str | None:
+    """
+    Screens the transcript for explicit language switch phrases.
+    Returns: "English", "Telugu", "Hindi", or None if no override keyword is found.
+    Bypasses override check if text consists purely of numbers/digits and/or tokens in UNIVERSAL_FILLER_WORDS.
+    """
+    if not text:
+        return None
+
+    # Lowercase and strip punctuation
+    cleaned = text.lower().strip()
+    punctuation = '.,?!;:"\'()[]{}<>-।`~@#$%^&*_+='
+    cleaned = "".join(c for c in cleaned if c not in punctuation)
+    
+    # Strip digits/numbers
+    cleaned_no_digits = re.sub(r'\d+', '', cleaned)
+    
+    # Extract words
+    words = cleaned_no_digits.split()
+    
+    # Check if all remaining words are in UNIVERSAL_FILLER_WORDS
+    if not words or all(w in UNIVERSAL_FILLER_WORDS for w in words):
+        return None
+
+    text_lower = text.lower()
+    # Check English
+    if "switch to english" in text_lower or "speak in english" in text_lower or "english translation" in text_lower or "अंग्रेजी में बोलो" in text_lower or "ఇంగ్లీష్" in text_lower:
+        return "English"
+    # Check Telugu
+    if "telugu to change" in text_lower or "speak in telugu" in text_lower or "switch to telugu" in text_lower or "telugu lo matladu" in text_lower or "తెలుగులో మాట్లాడు" in text_lower or "తెలుగు" in text_lower:
+        return "Telugu"
+    # Check Hindi
+    if "hindi lo matladu" in text_lower or "speak in hindi" in text_lower or "switch to hindi" in text_lower or "hindi mein bolo" in text_lower or "हिंदी में बोलो" in text_lower or "हिंदी" in text_lower:
+        return "Hindi"
+    return None
+
+
+def match_conversational_phrase(text: str) -> str | None:
+    """
+    Checks if the normalized text is a simple greeting, okay acknowledgment, or thank you closing.
+    Returns: 'thank_you', 'okay', 'greeting', or None.
+    """
+    if not text:
+        return None
+    
+    cleaned = text.lower().strip()
+    punctuation = '.,?!;:"\'()[]{}<>-।`~@#$%^&*_+='
+    cleaned = "".join(c for c in cleaned if c not in punctuation)
+    
+    thank_you_patterns = {
+        "thank you", "thanks", "thankyou", 
+        "థాంక్యూ", "థాంక్స్", 
+        "धन्यवाद", "थैंक यू", "शुक्रिया"
+    }
+    okay_patterns = {
+        "okay", "ok", "fine", "sure", 
+        "సరే", "ఓకే", 
+        "ठीक है", "ओके"
+    }
+    hello_patterns = {
+        "hello", "hi", "hey", "greetings", 
+        "హలో", "నమస్కారం", 
+        "नमस्ते", "नमस्कार"
+    }
+    
+    if cleaned in thank_you_patterns:
+        return "thank_you"
+    if cleaned in okay_patterns:
+        return "okay"
+    if cleaned in hello_patterns:
+        return "greeting"
+        
+    return None
+
+def get_localized_phrase_response(phrase_type: str, lang_key: str) -> str:
+    """
+    Returns localized responses for common conversational acknowledgements/phrases.
+    """
+    l_key = "en"
+    if "te" in lang_key.lower():
+        l_key = "te"
+    elif "hi" in lang_key.lower():
+        l_key = "hi"
+
+    phrase_matrix = {
+        "te": {
+            "thank_you": "మీకు స్వాగతం! మీకు సహాయం చేయడానికి సంతోషిస్తున్నాను. ఇంకా ఏదైనా సహాయం కావాలా?",
+            "okay": "సరే, మీకు ఇంకా ఏమైనా సహాయం కావాలా?",
+            "greeting": "హలో! లాజిరూట్ ఎక్స్‌ప్రెస్‌కు స్వాగతం. ఈరోజు నేను మీకు ఎలా సహాయం చేయగలను?"
+        },
+        "hi": {
+            "thank_you": "आपका स्वागत है! मुझे आपकी सहायता करके खुशी हुई। क्या आपको कोई और सहायता चाहिए?",
+            "okay": "ठीक है, क्या आपको कोई और सहायता चाहिए?",
+            "greeting": "नमस्ते! लॉजीरूट एक्सप्रेस में आपका स्वागत है। आज मैं आपकी क्या सहायता कर सकता हूँ?",
+        },
+        "en": {
+            "thank_you": "You're welcome! I'm glad I could help. Do you need any further assistance?",
+            "okay": "Okay, is there anything else I can help you with?",
+            "greeting": "Hello! Welcome to LogiRoute Express. How can I assist you today?"
+        }
+    }
+    
+    return phrase_matrix[l_key].get(phrase_type, phrase_matrix[l_key]["greeting"])
+
+
+def normalize_indic_alphanumerics(text: str) -> str:
+    """
+    Normalizes Telugu and Hindi phonetic letters and digits to standard English alpha-numerics.
+    """
+    if not text:
+        return text
+
+    # Base dictionary for mapping
+    mapping = {
+        # Letter replacements
+        "エス ヘッチ": "SH",
+        "ఎస్ హెచ్": "SH",
+        "एस एच": "SH",
+        "एसएच": "SH",
+        "s.h.": "SH",
+        "s h": "SH",
+        "s-h": "SH",
+        
+        # Telugu digits
+        "వన్": "1",
+        "ఒన్": "1",
+        "టూ": "2",
+        "త్రీ": "3",
+        "ఫోర్": "4",
+        "ఫైవ్": "5",
+        
+        # Hindi digits
+        "वन": "1",
+        "टू": "2",
+        "थ्री": "3",
+        "फोर": "4",
+        "फाइव": "5"
+    }
+
+    # Case-insensitive replacement helper
+    def replace_case_insensitive(s, old, new):
+        pattern = re.compile(re.escape(old), re.IGNORECASE)
+        return pattern.sub(new, s)
+
+    normalized = text
+    # Apply replacements (longest patterns first)
+    for pattern in sorted(mapping.keys(), key=len, reverse=True):
+        normalized = replace_case_insensitive(normalized, pattern, mapping[pattern])
+
+    # Collapse spaces in any "SH" followed by digits (e.g. "SH 1 2 3" -> "SH123")
+    def collapse_sh_spaces(match):
+        return match.group(0).replace(" ", "").replace("\t", "").upper()
+
+    normalized = re.sub(r'(?i)\bSH[\s\d]+', collapse_sh_spaces, normalized)
+
+    return normalized
+
+def get_localized_tracking_response(tracking_id: str, status: str, location: str, lang_key: str) -> str:
+    """
+    Builds the localized tracking response based on template format.
+    """
+    # Status localized translations
+    status_map = {
+        "te": {
+            "in transit": "ఇన్ ట్రాన్సిట్",
+            "out for delivery": "డెలివరీ కోసం అవుట్",
+            "delayed": "ఆలస్యం",
+            "cancelled": "రద్దు",
+            "created": "సృష్టించబడింది"
+        },
+        "hi": {
+            "in transit": "इन ट्रांजिट",
+            "out for delivery": "डिलीवरी के लिए बाहर",
+            "delayed": "देरी",
+            "cancelled": "रद्द",
+            "created": "तैयार"
+        },
+        "en": {
+            "in transit": "In Transit",
+            "out for delivery": "Out for Delivery",
+            "delayed": "Delayed",
+            "cancelled": "Cancelled",
+            "created": "Created"
+        }
+    }
+
+    # Location localized translations
+    location_map = {
+        "te": {
+            "hyderabad": "హైదరాబాద్",
+            "ghatkesar": "ఘట్కేసర్",
+            "delhi hub": "ఢిల్లీ హబ్",
+            "origin depot": "ఆరిజిన్ డిపో"
+        },
+        "hi": {
+            "hyderabad": "हैदराबाद",
+            "ghatkesar": "घटकेसर",
+            "delhi hub": "दिल्ली हब",
+            "origin depot": "ओरिजिन डिपो"
+        },
+        "en": {
+            "hyderabad": "Hyderabad",
+            "ghatkesar": "Ghatkesar",
+            "delhi hub": "Delhi Hub",
+            "origin depot": "Origin Depot"
+        }
+    }
+
+    # Normalize inputs
+    status_key = status.lower()
+    location_key = location.lower()
+    
+    # Resolve correct language code (e.g. te-IN or te -> te)
+    l_key = "en"
+    if "te" in lang_key.lower() or "telugu" in lang_key.lower():
+        l_key = "te"
+    elif "hi" in lang_key.lower() or "hindi" in lang_key.lower():
+        l_key = "hi"
+
+    # Map status and location
+    mapped_status = status_map[l_key].get(status_key, status)
+    mapped_location = location_map[l_key].get(location_key, location)
+
+    if l_key == "te":
+        return f"మీ రవాణా పొట్లం పొడవునా చూస్తే, ఐడి {tracking_id} ప్రస్తుతం {mapped_location} లో {mapped_status} లో ఉంది."
+    elif l_key == "hi":
+        return f"आपका शिपमेंट {tracking_id} वर्तमान में {mapped_location} में {mapped_status} में है।"
+    else:
+        return f"Your shipment {tracking_id} is currently {mapped_status} at the {mapped_location} hub."
 
 app = FastAPI(title="Voice Agent Translation & Transcription API")
 
@@ -125,21 +470,53 @@ async def transcribe(
             temp_file.write(contents)
             
         # Dynamically forward to established stt_services based on language code
+        active_lang = language_code
         if language_code == "auto":
+            cached_lang = database.get_session_language(session_id)
+            if cached_lang:
+                if cached_lang == "Telugu" or cached_lang.startswith("te"):
+                    active_lang = "te-IN"
+                elif cached_lang == "Hindi" or cached_lang.startswith("hi"):
+                    active_lang = "hi-IN"
+                elif cached_lang == "English" or cached_lang.startswith("en"):
+                    active_lang = "en-IN"
+                else:
+                    active_lang = cached_lang
+
+        if active_lang == "auto":
             result = stt_services.transcribe_auto(temp_file_path)
             engine_used = result["telemetry"]["engine_used"]
             logged_lang = result["telemetry"].get("detected_language", "auto")
-        elif language_code.startswith("en"):
+        elif active_lang.startswith("en"):
             engine_used = "Groq"
             result = stt_services.transcribe_english(temp_file_path)
-            logged_lang = language_code
+            logged_lang = language_code if language_code != "auto" else "English"
+        elif active_lang.startswith("te"):
+            engine_used = "Sarvam"
+            result = stt_services.transcribe_indic(temp_file_path, language_code="te-IN")
+            logged_lang = language_code if language_code != "auto" else "Telugu"
+        elif active_lang.startswith("hi"):
+            engine_used = "Sarvam"
+            result = stt_services.transcribe_indic(temp_file_path, language_code="hi-IN")
+            logged_lang = language_code if language_code != "auto" else "Hindi"
         else:
             engine_used = "Sarvam"
-            result = stt_services.transcribe_indic(temp_file_path, language_code=language_code)
-            logged_lang = language_code
+            result = stt_services.transcribe_indic(temp_file_path, language_code=active_lang)
+            logged_lang = language_code if language_code != "auto" else active_lang
 
         transcript = result["transcript"]
         duration = result["telemetry"]["duration_seconds"]
+
+        # Normalize Telugu/Hindi digit and character spellings
+        transcript = normalize_indic_alphanumerics(transcript)
+
+        # Check if the query is a simple greeting / acknowledgment
+        phrase_type = match_conversational_phrase(transcript)
+
+        # Check for user override phrase to explicitly transition the sticky session language
+        override_lang = detect_language_override(transcript)
+        if override_lang:
+            logged_lang = override_lang
 
         # Parse tracking ID from transcript using case-insensitive regex SH\d{3}
         match = re.search(r"SH\d{3}", transcript, re.IGNORECASE)
@@ -151,16 +528,42 @@ async def transcribe(
             context_data = database.get_shipment_details(tracking_id)
             mode = "tracking"
 
-        # Generate response using OpenAI LLM
-        res_dict = llm_service.generate_response(
-            user_text=transcript,
-            session_id=session_id,
-            context_data=context_data,
-            mode=mode
-        )
-        ai_response = res_dict["ai_response"]
-        tool_calls = res_dict["tool_calls"]
+        # Prioritize the sticky cache over token profiling
+        cached_lang = database.get_session_language(session_id)
+        if cached_lang:
+            if cached_lang == "Telugu" or cached_lang.lower().startswith("te"):
+                logged_lang = "te-IN"
+            elif cached_lang == "Hindi" or cached_lang.lower().startswith("hi"):
+                logged_lang = "hi-IN"
+            elif cached_lang == "English" or cached_lang.lower().startswith("en"):
+                logged_lang = "en-IN"
+
+        ai_response = None
+        tool_calls = None
         new_session_id = None
+
+        if phrase_type and cached_lang:
+            # Bypass LLM: Return localized template phrase response directly
+            ai_response = get_localized_phrase_response(phrase_type, logged_lang)
+        elif mode == "tracking" and context_data:
+            # Bypass LLM: Return localized template tracking response directly
+            lang_key = get_language_from_code_or_name(logged_lang)
+            ai_response = get_localized_tracking_response(
+                tracking_id=tracking_id,
+                status=context_data.get("status"),
+                location=context_data.get("current_location"),
+                lang_key=lang_key
+            )
+        else:
+            # Generate response using OpenAI LLM
+            res_dict = llm_service.generate_response(
+                user_text=transcript,
+                session_id=session_id,
+                context_data=context_data,
+                mode=mode
+            )
+            ai_response = res_dict["ai_response"]
+            tool_calls = res_dict["tool_calls"]
 
         if tool_calls:
             lang_key = get_language_from_code_or_name(logged_lang)
