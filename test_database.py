@@ -208,5 +208,30 @@ class TestDatabase(unittest.TestCase):
         lang = database.get_session_language("session_test_lang")
         self.assertEqual(lang, "Telugu")
 
+    def test_session_state_management(self):
+        # 1. Retrieve default state for non-existent session
+        stage, slots, lang = database.get_session_state("session_non_existent")
+        self.assertEqual(stage, "GREETING")
+        self.assertEqual(slots, {})
+        self.assertIsNone(lang)
+        
+        # 2. Update session state (which creates a new log entry)
+        database.update_session_state("session_state_test", "PICKUP_GATHERING_SLOTS", {"pickup_location": "Hyderabad"}, "hi-IN")
+        
+        # 3. Retrieve and verify
+        stage, slots, lang = database.get_session_state("session_state_test")
+        self.assertEqual(stage, "PICKUP_GATHERING_SLOTS")
+        self.assertEqual(slots, {"pickup_location": "Hyderabad"})
+        self.assertEqual(lang, "hi-IN")
+        
+        # 4. Update state again (which updates the existing log entry)
+        database.update_session_state("session_state_test", "OFFER_ADDITIONAL_ASSISTANCE", {"pickup_location": "Hyderabad", "delivery_date": "tomorrow"}, "te-IN")
+        
+        # 5. Retrieve and verify update
+        stage, slots, lang = database.get_session_state("session_state_test")
+        self.assertEqual(stage, "OFFER_ADDITIONAL_ASSISTANCE")
+        self.assertEqual(slots, {"pickup_location": "Hyderabad", "delivery_date": "tomorrow"})
+        self.assertEqual(lang, "te-IN")
+
 if __name__ == '__main__':
     unittest.main()

@@ -7,12 +7,24 @@ import soundfile as sf
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
+import database
 import main
 from main import app
 
 class TestMainAPI(unittest.TestCase):
 
     def setUp(self):
+        # Patch database DB_FILE to avoid dirty data pollution
+        self.db_file_patcher = patch('database.DB_FILE', 'test_voice_agent.db')
+        self.db_file_patcher.start()
+        
+        if os.path.exists("test_voice_agent.db"):
+            try:
+                os.remove("test_voice_agent.db")
+            except Exception:
+                pass
+        database.init_db()
+
         self.client = TestClient(app)
         self.test_log_file = "test_transcript_history.json"
         
@@ -51,6 +63,7 @@ class TestMainAPI(unittest.TestCase):
         self.loud_wav_bytes = loud_buf.getvalue()
 
     def tearDown(self):
+        self.db_file_patcher.stop()
         self.log_file_patcher.stop()
         self.gen_resp_patcher.stop()
         self.log_int_patcher.stop()
@@ -58,6 +71,11 @@ class TestMainAPI(unittest.TestCase):
         self.tts_patcher.stop()
         if os.path.exists(self.test_log_file):
             os.remove(self.test_log_file)
+        if os.path.exists("test_voice_agent.db"):
+            try:
+                os.remove("test_voice_agent.db")
+            except Exception:
+                pass
 
 
     @patch('stt_services.transcribe_english')
@@ -528,10 +546,98 @@ class TestMainAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         json_data = response.json()
         
-        # Assert response is exactly the Telugu closing template response
         self.assertEqual(json_data["ai_response"], "మీకు స్వాగతం! మీకు సహాయం చేయడానికి సంతోషిస్తున్నాను. ఇంకా ఏదైనా సహాయం కావాలా?")
         self.mock_gen_resp.assert_not_called()
         self.mock_tts.assert_called_once_with(text=json_data["ai_response"], target_language_code="te-IN")
+
+    @patch('stt_services.transcribe_english')
+    def test_workflow_state_machine_slot_filling(self, mock_transcribe_eng):
+        # 1. Initiate workflow
+        resp_init = self.client.post("/initiate_workflow", json={"session_id": "test_workflow_session_1"})
+        self.assertEqual(resp_init.status_code, 200)
+        data_init = resp_init.json()
+        self.assertEqual(data_init["session_id"], "test_workflow_session_1")
+        self.assertIn("Hello! Welcome to Colaberry Logistics Support.", data_init["response_text"])
+        
+        # 2. Start pickup scheduling - missing location
+        mock_transcribe_eng.return_value = {
+            "transcript": "I want to schedule a pickup",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_workflow_session_1"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ai_response"], "Please provide the pickup location.")
+        
+        # 3. Provide location - missing date
+        mock_transcribe_eng.return_value = {
+            "transcript": "Hyderabad",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_workflow_session_1"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ai_response"], "Please provide the delivery date.")
+        
+        # 4. Provide date - missing weight
+        mock_transcribe_eng.return_value = {
+            "transcript": "tomorrow",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_workflow_session_1"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ai_response"], "Please provide the package weight.")
+        
+        # 5. Provide weight - complete scheduling
+        mock_transcribe_eng.return_value = {
+            "transcript": "5 kg",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_workflow_session_1"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("I have successfully scheduled your shipment! Your new tracking ID is SH", response.json()["ai_response"])
+
+        # 6. Unexpected input deflection test
+        self.client.post("/initiate_workflow", json={"session_id": "test_workflow_session_2"})
+        mock_transcribe_eng.return_value = {
+            "transcript": "I want to track a shipment",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_workflow_session_2"}
+        )
+        self.assertEqual(response.json()["ai_response"], "Please provide your shipment ID.")
+        
+        mock_transcribe_eng.return_value = {
+            "transcript": "tell me a joke",
+            "telemetry": {"duration_seconds": 1.0}
+        }
+        response = self.client.post(
+            "/transcribe",
+            files={"file": ("speech.wav", self.loud_wav_bytes, "audio/wav")},
+            data={"language_code": "en", "session_id": "test_workflow_session_2"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ai_response"], "I understand, but to help you with your request, I need you to provide the requested logistics information. Please provide the details.")
+        
+        stage, slots, lang = database.get_session_state("test_workflow_session_2")
+        self.assertEqual(stage, "WAITING_FOR_TRACKING_ID")
 
 if __name__ == '__main__':
     unittest.main()

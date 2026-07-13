@@ -116,7 +116,7 @@ import io
 import tempfile
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.responses import JSONResponse
 import re
 import random
@@ -407,11 +407,114 @@ def get_localized_tracking_response(tracking_id: str, status: str, location: str
     else:
         return f"Your shipment {tracking_id} is currently {mapped_status} at the {mapped_location} hub."
 
+
+def classify_intent(text: str) -> str:
+    """
+    Classifies the user text into one of exactly 5 core intents:
+    - TRACK_SHIPMENT
+    - SCHEDULE_PICKUP
+    - DELIVERY_DELAY_INQUIRY
+    - GENERAL_INQUIRY
+    - GOODBYE
+    """
+    if not text:
+        return "GENERAL_INQUIRY"
+        
+    t = text.lower().strip()
+    
+    # Do not treat cancellations as tracking shipment even if they contain tracking ID
+    if "cancel" in t or "రద్దు" in t or "रद्द" in t:
+        return "GENERAL_INQUIRY"
+    
+    # GOODBYE intent
+    goodbye_words = {
+        "bye", "goodbye", "thank you", "thanks", "done", "completed", "no help", "nothing else", "no thanks",
+        "థాంక్యూ", "థాంక్స్", "సెలవు", "వద్దు", "చాలు",
+        "धन्यवाद", "अलविदा", "शुक्रिया", "बस", "नहीं चाहिए"
+    }
+    if any(w in t for w in goodbye_words):
+        return "GOODBYE"
+        
+    # TRACK_SHIPMENT intent (including matching SH tracking ID pattern directly)
+    track_words = {
+        "track", "status", "where is", "where's", "shi", "sh1", "sh4", "sh7",
+        "ట్రాక్", "ఎక్కడ", "స్థితి", "స్టేటస్",
+        "ट्रैक", "स्थिति", "कहाँ है", "कहा है"
+    }
+    if any(w in t for w in track_words) or re.search(r"SH\d{3}", text, re.IGNORECASE):
+        return "TRACK_SHIPMENT"
+        
+    # SCHEDULE_PICKUP intent
+    pickup_words = {
+        "schedule", "pickup", "pick up", "book", "courier", "send parcel", "create shipment", "place order", "place an order",
+        "పికప్", "బుక్", "షెడ్యూల్", "పార్సెల్",
+        "पिकअप", "बुक", "शेड्यूल", "पार्सल", "भेजना"
+    }
+    if any(w in t for w in pickup_words):
+        return "SCHEDULE_PICKUP"
+        
+    # DELIVERY_DELAY_INQUIRY intent
+    delay_words = {
+        "delay", "delayed", "late", "not arrived", "postponed", "why is my package", "where is my delayed",
+        "ఆలస్యం", "లేట్", "ఎందుకు రాలేదు",
+        "देरी", "लेट", "क्यों नहीं आया"
+    }
+    if any(w in t for w in delay_words):
+        return "DELIVERY_DELAY_INQUIRY"
+        
+    return "GENERAL_INQUIRY"
+
+
+def is_off_topic_query(text: str) -> bool:
+    """
+    Detects if the user text is a completely off-topic request (like asking for a joke/weather)
+    or contains gibberish/unparseable input.
+    """
+    if not text:
+        return False
+    t = text.lower().strip()
+    off_topic_keywords = {
+        "joke", "weather", "song", "story", "meaning of life", "who are you", "what is your name", "tell me a",
+        "asdf", "qwerty", "zxcv"
+    }
+    if any(k in t for k in off_topic_keywords):
+        return True
+    # Check for gibberish (e.g. no vowels in a word of length >= 4)
+    words = t.split()
+    for w in words:
+        if len(w) >= 4 and not any(v in w for v in "aeiouy\u0c05\u0c06\u0c07\u0c08\u0c09\u0c0a\u0c0b\u0c0c\u0c0e\u0c0f\u0c10\u0c12\u0c13\u0c14\u0905\u0906\u0907\u0908\u0909\u090a\u090b\u090c\u090f\u0910\u0913\u0914"):
+            return True
+    return False
+
+
+active_workflow_sessions = set()
+
 app = FastAPI(title="Voice Agent Translation & Transcription API")
 
 @app.on_event("startup")
 async def startup_event():
     database.init_db()
+
+
+@app.post("/initiate_workflow")
+async def initiate_workflow(data: dict = Body(None)):
+    session_id = None
+    if data:
+        session_id = data.get("session_id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    
+    database.update_session_state(session_id, "GREETING", {}, "en-IN")
+    active_workflow_sessions.add(session_id)
+    
+    welcome_text = "Hello! Welcome to Colaberry Logistics Support. How may I assist you today?"
+    audio_b64 = tts_service.generate_speech_b64(text=welcome_text, target_language_code="en-IN")
+    
+    return {
+        "session_id": session_id,
+        "response_text": welcome_text,
+        "audio_b64": audio_b64
+    }
 
 
 @app.post("/transcribe")
@@ -506,118 +609,416 @@ async def transcribe(
 
         transcript = result["transcript"]
         duration = result["telemetry"]["duration_seconds"]
+        if logged_lang == "auto" and "telemetry" in result and "detected_language" in result["telemetry"]:
+            logged_lang = result["telemetry"]["detected_language"]
 
         # Normalize Telugu/Hindi digit and character spellings
         transcript = normalize_indic_alphanumerics(transcript)
 
-        # Check if the query is a simple greeting / acknowledgment
-        phrase_type = match_conversational_phrase(transcript)
+        # Check if the session was initiated via /initiate_workflow
+        is_workflow_session = session_id in active_workflow_sessions
 
-        # Check for user override phrase to explicitly transition the sticky session language
-        override_lang = detect_language_override(transcript)
-        if override_lang:
-            logged_lang = override_lang
-
-        # Parse tracking ID from transcript using case-insensitive regex SH\d{3}
-        match = re.search(r"SH\d{3}", transcript, re.IGNORECASE)
-        tracking_id = None
-        context_data = None
-        mode = "general"
-        if match:
-            tracking_id = match.group(0).upper()
-            context_data = database.get_shipment_details(tracking_id)
-            mode = "tracking"
-
-        # Prioritize the sticky cache over token profiling
-        cached_lang = database.get_session_language(session_id)
-        if cached_lang:
-            if cached_lang == "Telugu" or cached_lang.lower().startswith("te"):
-                logged_lang = "te-IN"
-            elif cached_lang == "Hindi" or cached_lang.lower().startswith("hi"):
-                logged_lang = "hi-IN"
-            elif cached_lang == "English" or cached_lang.lower().startswith("en"):
-                logged_lang = "en-IN"
+        if is_workflow_session:
+            # Get active conversation progress state
+            current_stage, pending_slots, cached_lang = database.get_session_state(session_id)
+            
+            # Check for user override phrase to explicitly transition the sticky session language
+            override_lang = detect_language_override(transcript)
+            if override_lang:
+                if override_lang == "Telugu":
+                    logged_lang = "te-IN"
+                elif override_lang == "Hindi":
+                    logged_lang = "hi-IN"
+                elif override_lang == "English":
+                    logged_lang = "en-IN"
+                else:
+                    logged_lang = override_lang
+            else:
+                if cached_lang:
+                    if cached_lang == "Telugu" or cached_lang.lower().startswith("te"):
+                        logged_lang = "te-IN"
+                    elif cached_lang == "Hindi" or cached_lang.lower().startswith("hi"):
+                        logged_lang = "hi-IN"
+                    elif cached_lang == "English" or cached_lang.lower().startswith("en"):
+                        logged_lang = "en-IN"
+                    else:
+                        logged_lang = cached_lang
+                else:
+                    logged_lang = active_lang
+        else:
+            current_stage = "GREETING"
+            pending_slots = {}
+            cached_lang = database.get_session_language(session_id)
+            
+            override_lang = detect_language_override(transcript)
+            if override_lang:
+                logged_lang = override_lang
+            else:
+                if cached_lang:
+                    if cached_lang == "Telugu" or cached_lang.lower().startswith("te"):
+                        logged_lang = "te-IN"
+                    elif cached_lang == "Hindi" or cached_lang.lower().startswith("hi"):
+                        logged_lang = "hi-IN"
+                    elif cached_lang == "English" or cached_lang.lower().startswith("en"):
+                        logged_lang = "en-IN"
+                    else:
+                        logged_lang = cached_lang
+                else:
+                    if language_code == "auto":
+                        logged_lang = result["telemetry"].get("detected_language", "English")
+                    else:
+                        if active_lang.startswith("en"):
+                            logged_lang = language_code if language_code != "auto" else "English"
+                        elif active_lang.startswith("te"):
+                            logged_lang = language_code if language_code != "auto" else "Telugu"
+                        elif active_lang.startswith("hi"):
+                            logged_lang = language_code if language_code != "auto" else "Hindi"
+                        else:
+                            logged_lang = language_code if language_code != "auto" else active_lang
 
         ai_response = None
         tool_calls = None
         new_session_id = None
+        tracking_id = None
+        context_data = None
+        mode = "general"
 
-        if phrase_type and cached_lang:
-            # Bypass LLM: Return localized template phrase response directly
-            ai_response = get_localized_phrase_response(phrase_type, logged_lang)
-        elif mode == "tracking" and context_data:
-            # Bypass LLM: Return localized template tracking response directly
-            lang_key = get_language_from_code_or_name(logged_lang)
-            ai_response = get_localized_tracking_response(
-                tracking_id=tracking_id,
-                status=context_data.get("status"),
-                location=context_data.get("current_location"),
-                lang_key=lang_key
-            )
-        else:
-            # Generate response using OpenAI LLM
-            res_dict = llm_service.generate_response(
-                user_text=transcript,
-                session_id=session_id,
-                context_data=context_data,
-                mode=mode
-            )
-            ai_response = res_dict["ai_response"]
-            tool_calls = res_dict["tool_calls"]
+        if is_workflow_session:
+            # Explicit Intent Router
+            intent = classify_intent(transcript)
 
-        if tool_calls:
-            lang_key = get_language_from_code_or_name(logged_lang)
-            t = TRANSLATIONS[lang_key]
-            for tool_call in tool_calls:
-                func_name = tool_call.function.name
-                if func_name == "create_new_shipment_record":
-                    try:
-                        args = json.loads(tool_call.function.arguments)
-                        pickup_address = args.get("pickup_address")
-                        destination_address = args.get("destination_address")
-                        package_weight = args.get("package_weight")
-                        pickup_time = args.get("pickup_time")
-                        
-                        # Generate unique random tracking ID SH + 3 digits
-                        while True:
-                            generated_id = f"SH{random.randint(100, 999)}"
-                            if not database.get_shipment_details(generated_id):
-                                tracking_id = generated_id
-                                break
-                                
-                        database.insert_new_order(
+            # Unexpected Input Deflection check
+            is_gathering_parameters = (
+                current_stage in ("WAITING_FOR_TRACKING_ID", "WAITING_FOR_DELAY_ID") or 
+                current_stage.startswith("PICKUP_WAITING_")
+            )
+            
+            is_off_topic = False
+            if is_gathering_parameters:
+                if current_stage in ("WAITING_FOR_TRACKING_ID", "WAITING_FOR_DELAY_ID"):
+                    has_tracking_id = bool(re.search(r"SH\d{3}", transcript, re.IGNORECASE))
+                    if not has_tracking_id and is_off_topic_query(transcript):
+                        is_off_topic = True
+                elif current_stage.startswith("PICKUP_WAITING_"):
+                    if is_off_topic_query(transcript):
+                        is_off_topic = True
+
+            if is_off_topic:
+                if "te" in logged_lang.lower():
+                    ai_response = "నేను అర్థం చేసుకున్నాను, కానీ మీ అభ్యర్థనను పూర్తి చేయడానికి నేను కోరిన లాజిస్టిక్స్ వివరాలను అందించాలి. దయచేసి వివరాలను అందించండి."
+                elif "hi" in logged_lang.lower():
+                    ai_response = "मैं समझता हूँ, लेकिन आपके अनुरोध को पूरा करने के लिए मुझे आपके द्वारा अनुरोधित रसद विवरण प्रदान करने की आवश्यकता है। कृपया विवरण प्रदान करें।"
+                else:
+                    ai_response = "I understand, but to help you with your request, I need you to provide the requested logistics information. Please provide the details."
+                database.update_session_state(session_id, current_stage, pending_slots, logged_lang)
+                
+            elif current_stage == "OFFER_ADDITIONAL_ASSISTANCE" and intent == "GOODBYE":
+                current_stage = "COMPLETED"
+                if "te" in logged_lang.lower():
+                    ai_response = "కొలాబెర్రీ లాజిస్టిక్స్ సపోర్ట్‌ను సంప్రదించినందుకు ధన్యవాదాలు! మీ రోజు బాగుండాలని కోరుకుంటున్నాను."
+                elif "hi" in logged_lang.lower():
+                    ai_response = "कोलैबेरी लॉजिस्टिक्स सपोर्ट से संपर्क करने के लिए धन्यवाद! आपका दिन शुभ हो।"
+                else:
+                    ai_response = "Thank you for contacting Colaberry Logistics Support. Have a great day!"
+                database.update_session_state(session_id, current_stage, {}, logged_lang)
+
+            elif intent == "TRACK_SHIPMENT" or current_stage == "WAITING_FOR_TRACKING_ID":
+                match = re.search(r"SH\d{3}", transcript, re.IGNORECASE)
+                if match:
+                    tracking_id = match.group(0).upper()
+                    context_data = database.get_shipment_details(tracking_id)
+                    if context_data:
+                        lang_key = get_language_from_code_or_name(logged_lang)
+                        ai_response = get_localized_tracking_response(
                             tracking_id=tracking_id,
-                            p_addr=pickup_address,
-                            d_addr=destination_address,
-                            weight=package_weight,
-                            p_time=pickup_time
+                            status=context_data.get("status"),
+                            location=context_data.get("current_location"),
+                            lang_key=lang_key
                         )
-                        ai_response = t["schedule_success"].format(tracking_id=tracking_id)
-                    except Exception as e:
-                        ai_response = t["schedule_error"].format(error=str(e))
-                elif func_name == "end_current_session":
-                    new_session_id = str(uuid.uuid4())
-                    ai_response = t["end_session"]
-                elif func_name == "cancel_shipment_order":
-                    try:
-                        args = json.loads(tool_call.function.arguments)
-                        t_id = args.get("tracking_id")
-                        if t_id:
-                            # Update the outer tracking_id for database logging tracking_id_ref
-                            tracking_id = t_id.strip().upper()
-                            result = database.cancel_shipment_order(tracking_id)
-                            if result == "SUCCESS":
-                                ai_response = t["cancel_success"].format(tracking_id=tracking_id)
-                            elif result == "ALREADY_CANCELLED":
-                                ai_response = t["cancel_already_cancelled"].format(tracking_id=tracking_id)
-                            elif result == "ALREADY_PICKED_UP":
-                                ai_response = t["cancel_already_picked_up"].format(tracking_id=tracking_id)
-                            elif result == "NOT_FOUND":
-                                ai_response = t["cancel_not_found"].format(tracking_id=tracking_id)
+                        current_stage = "OFFER_ADDITIONAL_ASSISTANCE"
+                        database.update_session_state(session_id, current_stage, {}, logged_lang)
+                    else:
+                        if "te" in logged_lang.lower():
+                            ai_response = "ఆ ఐడితో సరిపోలే షిప్‌మెంట్ నాకు కనుగొనబడలేదు. దయచేసి నంబర్‌ను సరిచూసి మళ్లీ ప్రయత్నించండి."
+                        elif "hi" in logged_lang.lower():
+                            ai_response = "मुझे उस आईडी से मेल खाने वाला कोई शिपमेंट नहीं मिला। कृपया नंबर दोबारा जांचें और फिर प्रयास करें।"
                         else:
-                            ai_response = t["cancel_invalid_id"]
-                    except Exception as e:
-                        ai_response = t["cancel_error"].format(error=str(e))
+                            ai_response = "I couldn't find a shipment matching that ID. Please double-check the number and try again."
+                        current_stage = "WAITING_FOR_TRACKING_ID"
+                        database.update_session_state(session_id, current_stage, {}, logged_lang)
+                else:
+                    if "te" in logged_lang.lower():
+                        ai_response = "దయచేసి మీ షిప్‌మెంట్ ఐడిని అందించండి."
+                    elif "hi" in logged_lang.lower():
+                        ai_response = "कृपया अपनी शिपमेंट आईडी प्रदान करें।"
+                    else:
+                        ai_response = "Please provide your shipment ID."
+                    current_stage = "WAITING_FOR_TRACKING_ID"
+                    database.update_session_state(session_id, current_stage, {}, logged_lang)
+
+            elif intent == "SCHEDULE_PICKUP" or current_stage.startswith("PICKUP_"):
+                if not current_stage.startswith("PICKUP_"):
+                    current_stage = "PICKUP_GATHERING_SLOTS"
+                    pending_slots = {}
+                    weight_match = re.search(r'\b(\d+(?:\.\d+)?\s*(?:kg|kgs|kilogram|kilograms|lbs|pounds|కేజీ|కేజీలు|కిలో|కిలోలు|किलो|किलोग्राम|g))\b', transcript, re.IGNORECASE)
+                    if weight_match:
+                        pending_slots["package_weight"] = weight_match.group(0)
+                    date_match = re.search(r'\b(tomorrow|today|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday|రేపు|ఈ రోజు|కల్|आज|परसों)\b', transcript, re.IGNORECASE)
+                    if date_match:
+                        pending_slots["delivery_date"] = date_match.group(0)
+                    loc_match = re.search(r'\b(hyderabad|ghatkesar|delhi|mumbai|kphb|hitech city|secunderabad|బెంగళూరు|వరంగల్|मुंबई|दिल्ली|हैदराबाद|बेंगलुरु)\b', transcript, re.IGNORECASE)
+                    if loc_match:
+                        pending_slots["pickup_location"] = loc_match.group(0)
+                else:
+                    if current_stage == "PICKUP_WAITING_FOR_LOCATION":
+                        pending_slots["pickup_location"] = transcript
+                    elif current_stage == "PICKUP_WAITING_FOR_DATE":
+                        pending_slots["delivery_date"] = transcript
+                    elif current_stage == "PICKUP_WAITING_FOR_WEIGHT":
+                        pending_slots["package_weight"] = transcript
+
+                if not pending_slots.get("pickup_location"):
+                    current_stage = "PICKUP_WAITING_FOR_LOCATION"
+                    if "te" in logged_lang.lower():
+                        ai_response = "దయచేసి పికప్ లొకేషన్‌ను అందించండి."
+                    elif "hi" in logged_lang.lower():
+                        ai_response = "कृपया पिकअप स्थान प्रदान करें।"
+                    else:
+                        ai_response = "Please provide the pickup location."
+                elif not pending_slots.get("delivery_date"):
+                    current_stage = "PICKUP_WAITING_FOR_DATE"
+                    if "te" in logged_lang.lower():
+                        ai_response = "దయచేసి డెలివరీ తేదీని అందించండి."
+                    elif "hi" in logged_lang.lower():
+                        ai_response = "कृपया डिलीवरी की तारीख प्रदान करें।"
+                    else:
+                        ai_response = "Please provide the delivery date."
+                elif not pending_slots.get("package_weight"):
+                    current_stage = "PICKUP_WAITING_FOR_WEIGHT"
+                    if "te" in logged_lang.lower():
+                        ai_response = "దయచేసి ప్యాకేజీ బరువును అందించండి."
+                    elif "hi" in logged_lang.lower():
+                        ai_response = "कृपया पैकेज का वजन प्रदान करें।"
+                    else:
+                        ai_response = "Please provide the package weight."
+                else:
+                    while True:
+                        generated_id = f"SH{random.randint(100, 999)}"
+                        if not database.get_shipment_details(generated_id):
+                            tracking_id = generated_id
+                            break
+                    database.insert_new_order(
+                        tracking_id=tracking_id,
+                        p_addr=pending_slots["pickup_location"],
+                        d_addr="Delhi Hub",
+                        weight=pending_slots["package_weight"],
+                        p_time=pending_slots["delivery_date"]
+                    )
+                    lang_key = get_language_from_code_or_name(logged_lang)
+                    t = TRANSLATIONS[lang_key]
+                    ai_response = t["schedule_success"].format(tracking_id=tracking_id)
+                    current_stage = "OFFER_ADDITIONAL_ASSISTANCE"
+                    pending_slots = {}
+
+                database.update_session_state(session_id, current_stage, pending_slots, logged_lang)
+
+            elif intent == "DELIVERY_DELAY_INQUIRY" or current_stage == "WAITING_FOR_DELAY_ID":
+                match = re.search(r"SH\d{3}", transcript, re.IGNORECASE)
+                if match:
+                    tracking_id = match.group(0).upper()
+                    context_data = database.get_shipment_details(tracking_id)
+                    if context_data:
+                        status = context_data.get("status", "")
+                        location = context_data.get("current_location", "")
+                        eta = context_data.get("eta_days", 0)
+                        if status == "Delayed":
+                            if "te" in logged_lang.lower():
+                                ai_response = f"మీ రవాణా పొట్లం {tracking_id} ఆలస్యమైంది. ఇది ప్రస్తుతం {location} లో ఉంది. ఇది చేరడానికి మరో {eta} రోజులు పడుతుంది."
+                            elif "hi" in logged_lang.lower():
+                                ai_response = f"आपका शिपमेंट {tracking_id} विलंबित है। यह वर्तमान में {location} में है। इसमें {eta} दिन और लगेंगे।"
+                            else:
+                                ai_response = f"Your shipment {tracking_id} is delayed. It is currently at the {location} hub. It is expected to arrive in {eta} days."
+                        else:
+                            lang_key = get_language_from_code_or_name(logged_lang)
+                            ai_response = get_localized_tracking_response(
+                                tracking_id=tracking_id,
+                                status=status,
+                                location=location,
+                                lang_key=lang_key
+                            )
+                        current_stage = "OFFER_ADDITIONAL_ASSISTANCE"
+                        database.update_session_state(session_id, current_stage, {}, logged_lang)
+                    else:
+                        if "te" in logged_lang.lower():
+                            ai_response = "ఆ ఐడితో సరిపోలే షిప్‌మెంట్ నాకు కనుగొనబడలేదు. దయచేసి నంబర్‌ను సరిచూసి మళ్లీ ప్రయత్నించండి."
+                        elif "hi" in logged_lang.lower():
+                            ai_response = "मुझे उस आईडी से मेल खाने वाला कोई शिपमेंट नहीं मिला। कृपया नंबर दोबारा जांचें और फिर प्रयास करें।"
+                        else:
+                            ai_response = "I couldn't find a shipment matching that ID. Please double-check the number and try again."
+                        current_stage = "WAITING_FOR_DELAY_ID"
+                        database.update_session_state(session_id, current_stage, {}, logged_lang)
+                else:
+                    if "te" in logged_lang.lower():
+                        ai_response = "ఆ ఐడితో సరిపోలే షిప్‌మెంట్ నాకు కనుగొనబడలేదు. దయచేసి నంబర్‌ను సరిచూసి మళ్లీ ప్రయత్నించండి."
+                    elif "hi" in logged_lang.lower():
+                        ai_response = "मुझे उस आईडी से मेल खाने वाला कोई शिपमेंट नहीं मिला। कृपया नंबर दोबारा जांचें और फिर प्रयास करें।"
+                    else:
+                        ai_response = "I couldn't find a shipment matching that ID. Please double-check the number and try again."
+                    if current_stage != "WAITING_FOR_DELAY_ID":
+                        if "te" in logged_lang.lower():
+                            ai_response = "దయచేసి మీ షిప్‌మెంట్ ఐడిని అందించండి."
+                        elif "hi" in logged_lang.lower():
+                            ai_response = "कृपया अपनी शिपमेंट आईडी प्रदान करें।"
+                        else:
+                            ai_response = "Please provide your shipment ID."
+                    current_stage = "WAITING_FOR_DELAY_ID"
+                    database.update_session_state(session_id, current_stage, {}, logged_lang)
+
+            else:
+                phrase_type = match_conversational_phrase(transcript)
+                if phrase_type and cached_lang:
+                    ai_response = get_localized_phrase_response(phrase_type, logged_lang)
+                else:
+                    res_dict = llm_service.generate_response(
+                        user_text=transcript,
+                        session_id=session_id,
+                        context_data=context_data,
+                        mode=mode
+                    )
+                    ai_response = res_dict["ai_response"]
+                    tool_calls = res_dict["tool_calls"]
+
+                if tool_calls:
+                    lang_key = get_language_from_code_or_name(logged_lang)
+                    t = TRANSLATIONS[lang_key]
+                    for tool_call in tool_calls:
+                        func_name = tool_call.function.name
+                        if func_name == "create_new_shipment_record":
+                            try:
+                                args = json.loads(tool_call.function.arguments)
+                                pickup_address = args.get("pickup_address")
+                                destination_address = args.get("destination_address")
+                                package_weight = args.get("package_weight")
+                                pickup_time = args.get("pickup_time")
+                                
+                                while True:
+                                    generated_id = f"SH{random.randint(100, 999)}"
+                                    if not database.get_shipment_details(generated_id):
+                                        tracking_id = generated_id
+                                        break
+                                        
+                                database.insert_new_order(
+                                    tracking_id=tracking_id,
+                                    p_addr=pickup_address,
+                                    d_addr=destination_address,
+                                    weight=package_weight,
+                                    p_time=pickup_time
+                                )
+                                ai_response = t["schedule_success"].format(tracking_id=tracking_id)
+                            except Exception as e:
+                                ai_response = t["schedule_error"].format(error=str(e))
+                        elif func_name == "end_current_session":
+                            new_session_id = str(uuid.uuid4())
+                            ai_response = t["end_session"]
+                        elif func_name == "cancel_shipment_order":
+                            try:
+                                args = json.loads(tool_call.function.arguments)
+                                t_id = args.get("tracking_id")
+                                if t_id:
+                                    tracking_id = t_id.strip().upper()
+                                    result = database.cancel_shipment_order(tracking_id)
+                                    if result == "SUCCESS":
+                                        ai_response = t["cancel_success"].format(tracking_id=tracking_id)
+                                    elif result == "ALREADY_CANCELLED":
+                                        ai_response = t["cancel_already_cancelled"].format(tracking_id=tracking_id)
+                                    elif result == "ALREADY_PICKED_UP":
+                                        ai_response = t["cancel_already_picked_up"].format(tracking_id=tracking_id)
+                                    elif result == "NOT_FOUND":
+                                        ai_response = t["cancel_not_found"].format(tracking_id=tracking_id)
+                                else:
+                                    ai_response = t["cancel_invalid_id"]
+                            except Exception as e:
+                                ai_response = t["cancel_error"].format(error=str(e))
+        else:
+            # Legacy/Direct LLM-based logic
+            phrase_type = match_conversational_phrase(transcript)
+            match = re.search(r"SH\d{3}", transcript, re.IGNORECASE)
+            if match:
+                tracking_id = match.group(0).upper()
+                context_data = database.get_shipment_details(tracking_id)
+                mode = "tracking"
+
+            if phrase_type and cached_lang:
+                ai_response = get_localized_phrase_response(phrase_type, logged_lang)
+            elif mode == "tracking" and context_data:
+                lang_key = get_language_from_code_or_name(logged_lang)
+                ai_response = get_localized_tracking_response(
+                    tracking_id=tracking_id,
+                    status=context_data.get("status"),
+                    location=context_data.get("current_location"),
+                    lang_key=lang_key
+                )
+            else:
+                res_dict = llm_service.generate_response(
+                    user_text=transcript,
+                    session_id=session_id,
+                    context_data=context_data,
+                    mode=mode
+                )
+                ai_response = res_dict["ai_response"]
+                tool_calls = res_dict["tool_calls"]
+
+            if tool_calls:
+                lang_key = get_language_from_code_or_name(logged_lang)
+                t = TRANSLATIONS[lang_key]
+                for tool_call in tool_calls:
+                    func_name = tool_call.function.name
+                    if func_name == "create_new_shipment_record":
+                        try:
+                            args = json.loads(tool_call.function.arguments)
+                            pickup_address = args.get("pickup_address")
+                            destination_address = args.get("destination_address")
+                            package_weight = args.get("package_weight")
+                            pickup_time = args.get("pickup_time")
+                            
+                            while True:
+                                generated_id = f"SH{random.randint(100, 999)}"
+                                if not database.get_shipment_details(generated_id):
+                                    tracking_id = generated_id
+                                    break
+                                    
+                            database.insert_new_order(
+                                tracking_id=tracking_id,
+                                p_addr=pickup_address,
+                                d_addr=destination_address,
+                                weight=package_weight,
+                                p_time=pickup_time
+                            )
+                            ai_response = t["schedule_success"].format(tracking_id=tracking_id)
+                        except Exception as e:
+                            ai_response = t["schedule_error"].format(error=str(e))
+                    elif func_name == "end_current_session":
+                        new_session_id = str(uuid.uuid4())
+                        ai_response = t["end_session"]
+                    elif func_name == "cancel_shipment_order":
+                        try:
+                            args = json.loads(tool_call.function.arguments)
+                            t_id = args.get("tracking_id")
+                            if t_id:
+                                tracking_id = t_id.strip().upper()
+                                result = database.cancel_shipment_order(tracking_id)
+                                if result == "SUCCESS":
+                                    ai_response = t["cancel_success"].format(tracking_id=tracking_id)
+                                elif result == "ALREADY_CANCELLED":
+                                    ai_response = t["cancel_already_cancelled"].format(tracking_id=tracking_id)
+                                elif result == "ALREADY_PICKED_UP":
+                                    ai_response = t["cancel_already_picked_up"].format(tracking_id=tracking_id)
+                                elif result == "NOT_FOUND":
+                                    ai_response = t["cancel_not_found"].format(tracking_id=tracking_id)
+                            else:
+                                ai_response = t["cancel_invalid_id"]
+                        except Exception as e:
+                            ai_response = t["cancel_error"].format(error=str(e))
 
         # Generate TTS audio payload
         audio_b64 = tts_service.generate_speech_b64(text=ai_response, target_language_code=logged_lang)
