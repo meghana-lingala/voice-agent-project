@@ -152,7 +152,7 @@ def main():
     last_interaction_time = time.time()
     warning_triggered = False
 
-    is_testing = "unittest" in sys.modules
+    is_testing = any("unittest" in arg or "pytest" in arg or "test_" in arg for arg in sys.argv)
 
     persistent_rec = None
     if not is_testing:
