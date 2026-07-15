@@ -21,6 +21,17 @@ SPEECH_ACTIVATION_RATIO = 0.40
 POST_SPEECH_SILENCE_SEC = 2.0
 INITIAL_SILENCE_SEC     = 5.0
 
+_pre_calculated_threshold = None
+_persistent_recorder = None
+
+def set_pre_calculated_threshold(val: float):
+    global _pre_calculated_threshold
+    _pre_calculated_threshold = val
+
+def set_persistent_recorder(recorder_obj):
+    global _persistent_recorder
+    _persistent_recorder = recorder_obj
+
 def calculate_rms(audio_data: np.ndarray) -> float:
     """Return the Root Mean Square amplitude of a 1-D audio array."""
     if len(audio_data) == 0:
@@ -74,7 +85,10 @@ def record_audio(
 ) -> np.ndarray:
     """
     Record mono audio using an adaptive VAD pipeline starting on speech detection.
+    Supports dynamic bypass hooks for persistent background tracking.
     """
+    global _pre_calculated_threshold, _persistent_recorder
+
     if samplerate not in (8000, 16000, 32000, 48000):
         raise ValueError(
             f"webrtcvad requires sample rate in (8000, 16000, 32000, 48000), "
@@ -96,6 +110,113 @@ def record_audio(
     max_sec    = duration if duration is not None else 60.0
     max_chunks = int(max_sec / frame_sec)
 
+    # Bypassed check for persistent background stream + pre-calculated threshold
+    if _persistent_recorder is not None and _pre_calculated_threshold is not None:
+        energy_threshold = _pre_calculated_threshold
+        # Reset threshold hook so it is turn-specific
+        _pre_calculated_threshold = None
+
+        rms_history = collections.deque(maxlen=150)
+        rms_history.append(energy_threshold)
+
+        preroll_buffer = collections.deque(maxlen=10)
+        has_spoken = False
+        frames_read = 0
+        wait_start = time.time()
+
+        # Clear the queue first to ignore stale noises
+        with _persistent_recorder.lock:
+            _persistent_recorder.queue.clear()
+
+        # Wait loop (wait for speech)
+        while True:
+            if duration is not None and frames_read >= max_chunks:
+                break
+            if timeout is not None and (time.time() - wait_start) > timeout:
+                raise TimeoutError("Inactivity timeout")
+
+            data = None
+            if _persistent_recorder.queue:
+                with _persistent_recorder.lock:
+                    data = _persistent_recorder.queue.popleft()
+
+            if data is not None:
+                frames_read += 1
+                preroll_buffer.append(data.copy())
+                frame_rms = calculate_rms(data.flatten())
+                rms_history.append(frame_rms)
+
+                if frame_rms > energy_threshold:
+                    print("[VAD] Speech started... Recording initialized.")
+                    has_spoken = True
+                    break
+            else:
+                time.sleep(0.005)
+
+        if has_spoken:
+            audio_chunks = list(preroll_buffer)
+            silence_seconds = 0.0
+            speech_window = collections.deque(maxlen=SPEECH_WINDOW_FRAMES)
+            for _ in range(SPEECH_WINDOW_FRAMES):
+                speech_window.append(True)
+
+            remaining_chunks = max_chunks - frames_read
+            chunk_idx = 0
+            while chunk_idx < remaining_chunks:
+                data = None
+                if _persistent_recorder.queue:
+                    with _persistent_recorder.lock:
+                        data = _persistent_recorder.queue.popleft()
+
+                if data is not None:
+                    chunk_idx += 1
+                    audio_chunks.append(data.copy())
+                    flat = data.flatten()
+
+                    frame_rms = calculate_rms(flat)
+                    rms_history.append(frame_rms)
+
+                    noise_floor = np.percentile(list(rms_history), 5)
+                    dynamic_threshold = max(noise_floor * 3.0, MIN_ENERGY_THRESHOLD)
+                    above_energy = frame_rms > dynamic_threshold
+
+                    clipped = np.clip(flat, -1.0, 1.0)
+                    pcm_bytes = (clipped * 32767).astype(np.int16).tobytes()
+                    vad_speech = vad.is_speech(pcm_bytes, samplerate)
+
+                    is_active = above_energy and vad_speech
+                    speech_window.append(is_active)
+                    smooth_speech = (
+                        sum(speech_window) / len(speech_window)
+                        >= SPEECH_ACTIVATION_RATIO
+                    )
+
+                    if smooth_speech:
+                        silence_seconds = 0.0
+                    else:
+                        silence_seconds += frame_sec
+
+                    if silence_seconds >= POST_SPEECH_SILENCE_SEC:
+                        print("Silence detected. Stopping recording...")
+                        break
+                else:
+                    time.sleep(0.005)
+        else:
+            audio_chunks = list(preroll_buffer)
+
+        if not audio_chunks:
+            return np.zeros((0, 1), dtype='float32')
+
+        audio_data = np.concatenate(audio_chunks, axis=0)
+
+        if len(audio_data) > 0:
+            print("Applying spectral noise reduction...")
+            audio_data = nr.reduce_noise(y=audio_data.flatten(), sr=samplerate)
+            audio_data = audio_data.reshape(-1, 1)
+
+        return audio_data
+
+    # Traditional local stream calibration path (used in tests or fallback)
     try:
         with sd.InputStream(
             samplerate = samplerate,

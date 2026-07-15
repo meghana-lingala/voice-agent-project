@@ -8,9 +8,69 @@ import uuid
 import time
 import base64
 import pygame
+import threading
+import collections
+import sounddevice as sd
+import numpy as np
 
 BACKEND_URL = "http://127.0.0.1:8000/transcribe"
 END_SESSION_URL = "http://127.0.0.1:8000/end_session"
+INITIATE_WORKFLOW_URL = "http://127.0.0.1:8000/initiate_workflow"
+
+class PersistentAudioCapture:
+    def __init__(self, samplerate=16000, channels=1, dtype='float32', blocksize=480, device=None):
+        self.samplerate = samplerate
+        self.channels = channels
+        self.dtype = dtype
+        self.blocksize = blocksize
+        self.device = device
+        
+        self.stream = None
+        self.queue = collections.deque(maxlen=1000)
+        self.running = False
+        self.thread = None
+        self.lock = threading.Lock()
+        
+    def start(self):
+        try:
+            self.stream = sd.InputStream(
+                samplerate=self.samplerate,
+                channels=self.channels,
+                dtype=self.dtype,
+                blocksize=self.blocksize,
+                device=self.device
+            )
+            self.stream.start()
+            self.running = True
+            self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self.thread.start()
+        except Exception as e:
+            print(f"[WARNING] Failed to start sounddevice persistent stream: {e}", file=sys.stderr)
+            
+    def _capture_loop(self):
+        try:
+            for _ in range(10):
+                self.stream.read(self.blocksize)
+        except Exception:
+            pass
+        while self.running:
+            try:
+                data, _ = self.stream.read(self.blocksize)
+                with self.lock:
+                    self.queue.append(data.copy())
+            except Exception:
+                time.sleep(0.01)
+                
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        if self.stream:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
 
 def get_next_filename(directory: str) -> str:
     """
@@ -29,6 +89,51 @@ def get_next_filename(directory: str) -> str:
     next_idx = max_idx + 1
     return os.path.join(directory, f"sample_{next_idx:03d}.wav")
 
+def calculate_and_set_threshold(persistent_rec):
+    if not persistent_rec:
+        return
+    # Retrieve all frames collected during server latency window
+    with persistent_rec.lock:
+        latency_frames = list(persistent_rec.queue)
+        persistent_rec.queue.clear()
+        
+    if latency_frames:
+        flat = np.concatenate([f.flatten() for f in latency_frames])
+        noise_rms = audio_recorder.calculate_rms(flat)
+        # Calculate dynamic threshold above background noise floor
+        # Using NOISE_FLOOR_MULTIPLIER = 4.0 and MIN_ENERGY_THRESHOLD = 0.0008
+        energy_threshold = max(noise_rms * 4.0, 0.0008)
+    else:
+        energy_threshold = 0.0008
+        noise_rms = 0.0
+        
+    print(f"[VAD] Pre-speech baseline lock. Noise floor RMS: {noise_rms:.5f} -> Energy threshold set to: {energy_threshold:.5f}")
+    audio_recorder.set_pre_calculated_threshold(energy_threshold)
+
+def play_audio_response(audio_b64, persistent_rec):
+    if not audio_b64:
+        return
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        output_active_path = "response_active.wav"
+        with open(output_active_path, "wb") as audio_file:
+            audio_file.write(audio_bytes)
+        
+        pygame.mixer.music.load(output_active_path)
+        pygame.mixer.music.play()
+        
+        # Continuously purge the queue during playback to avoid capturing echo
+        while pygame.mixer.music.get_busy():
+            if persistent_rec:
+                with persistent_rec.lock:
+                    persistent_rec.queue.clear()
+            time.sleep(0.05)
+            
+        pygame.mixer.music.stop()
+        pygame.mixer.music.unload()
+    except Exception as play_err:
+        print(f"[ERROR] Failed playing audio response: {play_err}")
+
 def main():
     print("==================================================")
     print("      Voice Agent Interactive STT Client Panel    ")
@@ -46,6 +151,15 @@ def main():
     # Step 1: Add Inactivity State Tracking Variables
     last_interaction_time = time.time()
     warning_triggered = False
+
+    is_testing = "unittest" in sys.modules
+
+    persistent_rec = None
+    if not is_testing:
+        # Initialize persistent background streaming core
+        persistent_rec = PersistentAudioCapture()
+        persistent_rec.start()
+        audio_recorder.set_persistent_recorder(persistent_rec)
     
     while True:
         try:
@@ -60,6 +174,8 @@ def main():
                     requests.post(END_SESSION_URL, data={"session_id": session_id}, timeout=5)
                 except Exception:
                     pass
+                if persistent_rec:
+                    persistent_rec.stop()
                 sys.exit(0)
                 
             # Stage 1: The Warning Prompt (30 Seconds of Inactivity)
@@ -76,7 +192,7 @@ def main():
             timeout_val = (60.0 - elapsed) if warning_triggered else (30.0 - elapsed)
             
             try:
-                # Capture audio dynamically using VAD
+                # Capture audio dynamically using VAD (uses pre-calculated threshold and persistent queue)
                 audio_data = audio_recorder.record_audio(timeout=timeout_val)
             except TimeoutError:
                 # Loop back to let the timeout rules process
@@ -86,10 +202,8 @@ def main():
                 time.sleep(2.0)
                 continue
                 
-            duration_sec = len(audio_data) / 16000.0
-            
-            # Local float32 RMS calculation for telemetry info
-            rms = audio_recorder.calculate_rms(audio_data)
+            if len(audio_data) == 0:
+                continue
                 
             # Generate next sequential path
             output_file_path = get_next_filename(target_dir)
@@ -102,6 +216,12 @@ def main():
                 
             # 5. Network Payload Routing via Requests
             print("[SYSTEM] Processing turn...")
+            
+            # Clear background queue before starting request
+            if persistent_rec:
+                with persistent_rec.lock:
+                    persistent_rec.queue.clear()
+                
             try:
                 with open(output_file_path, "rb") as f:
                     files = {"file": (os.path.basename(output_file_path), f, "audio/wav")}
@@ -127,26 +247,14 @@ def main():
                     print(f" Server Latency : {res_data.get('telemetry', {}).get('duration_seconds', 0.0):.3f} seconds")
                     print("==========================================\n")
                     
+                    # Compute and set the threshold from the server latency window (Pre-Speech Baseline Lock)
+                    if persistent_rec:
+                        calculate_and_set_threshold(persistent_rec)
+                    
                     # Automated hands-free playback of agent's audio response
                     audio_b64 = res_data.get("audio_b64")
                     if audio_b64:
-                        try:
-                            audio_bytes = base64.b64decode(audio_b64)
-                            output_active_path = "response_active.wav"
-                            with open(output_active_path, "wb") as audio_file:
-                                audio_file.write(audio_bytes)
-                            
-                            pygame.mixer.music.load(output_active_path)
-                            pygame.mixer.music.play()
-                            
-                            # Blocking check loop to wait until audio completes playback
-                            while pygame.mixer.music.get_busy():
-                                time.sleep(0.1)
-                                
-                            pygame.mixer.music.stop()
-                            pygame.mixer.music.unload()
-                        except Exception as play_err:
-                            print(f"[ERROR] Failed playing audio response: {play_err}")
+                        play_audio_response(audio_b64, persistent_rec)
                     
                     # Update interaction time if valid non-empty transcript is returned
                     if transcript:
@@ -178,10 +286,12 @@ def main():
                 print(f"[ERROR] Networking pipeline error: {e}")
             
             # Breathing pause before turning mic back on
-            time.sleep(1.0)
+            time.sleep(0.5)
 
         except KeyboardInterrupt:
             print("\nExiting interactive panel. Goodbye!")
+            if persistent_rec:
+                persistent_rec.stop()
             break
         except Exception as e:
             print(f"[CRITICAL] Unexpected client loop crash: {e}")
