@@ -148,9 +148,10 @@ def _has_genuine_telugu(text: str) -> bool:
     matches = words & TELUGU_CONFIDENT_WORDS
     if not matches:
         return False
-    # Must have at least 1 long word (>2 chars) or at least 2 distinct matches
-    has_long = any(len(m) > 2 for m in matches)
-    return has_long or len(matches) >= 2
+    # If we have only 1 match, require it to be a long specific Telugu word (length >= 5)
+    # to avoid false positives on short pronouns/particles
+    has_long_specific = any(len(m) >= 5 for m in matches)
+    return has_long_specific or len(matches) >= 2
 
 
 def _has_genuine_hindi(text: str) -> bool:
@@ -164,9 +165,9 @@ def _has_genuine_hindi(text: str) -> bool:
     matches = words & HINDI_CONFIDENT_WORDS
     if not matches:
         return False
-    # Must have at least 1 long word (>2 chars) or at least 2 distinct matches
-    has_long = any(len(m) > 2 for m in matches)
-    return has_long or len(matches) >= 2
+    # If we have only 1 match, require it to be a long specific Hindi word (length >= 5)
+    has_long_specific = any(len(m) >= 5 for m in matches)
+    return has_long_specific or len(matches) >= 2
 
 
 def _get_audio_duration(file_path: str) -> float:

@@ -50,7 +50,7 @@ def normalize_indic_alphanumerics(text: str) -> str:
     def collapse_sh_spaces(match):
         return match.group(0).replace(" ", "").replace("\t", "")
 
-    normalized = re.sub(r'\bSH(?:\s+[a-zA-Z0-9]+)+\b', collapse_sh_spaces, normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\bSH(?:\s*\d)+\b', collapse_sh_spaces, normalized, flags=re.IGNORECASE)
 
     return normalized
 
