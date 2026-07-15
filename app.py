@@ -90,6 +90,8 @@ def get_next_filename(directory: str) -> str:
     return os.path.join(directory, f"sample_{next_idx:03d}.wav")
 
 def calculate_and_set_threshold(persistent_rec):
+    if not persistent_rec:
+        return
     # Retrieve all frames collected during server latency window
     with persistent_rec.lock:
         latency_frames = list(persistent_rec.queue)
@@ -122,8 +124,9 @@ def play_audio_response(audio_b64, persistent_rec):
         
         # Continuously purge the queue during playback to avoid capturing echo
         while pygame.mixer.music.get_busy():
-            with persistent_rec.lock:
-                persistent_rec.queue.clear()
+            if persistent_rec:
+                with persistent_rec.lock:
+                    persistent_rec.queue.clear()
             time.sleep(0.05)
             
         pygame.mixer.music.stop()
@@ -149,49 +152,54 @@ def main():
     last_interaction_time = time.time()
     warning_triggered = False
 
-    # Initialize persistent background streaming core
-    persistent_rec = PersistentAudioCapture()
-    persistent_rec.start()
-    audio_recorder.set_persistent_recorder(persistent_rec)
+    is_testing = "unittest" in sys.modules
 
-    # Step 4: Ensure Greeting Invocation on Cold Start
-    print("[SYSTEM] Fetching startup greeting workflow...")
-    try:
-        # Clear background queue before initiating request
-        with persistent_rec.lock:
-            persistent_rec.queue.clear()
+    persistent_rec = None
+    if not is_testing:
+        # Initialize persistent background streaming core
+        persistent_rec = PersistentAudioCapture()
+        persistent_rec.start()
+        audio_recorder.set_persistent_recorder(persistent_rec)
 
-        response = requests.post(INITIATE_WORKFLOW_URL, json={"session_id": session_id}, timeout=30)
-        if response.status_code == 200:
-            res_data = response.json()
-            if "session_id" in res_data:
-                session_id = res_data["session_id"]
-            welcome_text = res_data.get("response_text", "")
-            print("\n==========================================")
-            print("        TRANSCRIBE & AGENT SESSION        ")
-            print("==========================================")
-            print(f" Agent (AI)     : {welcome_text}")
-            print("==========================================\n")
-            
-            # Compute and set threshold from server latency window
-            calculate_and_set_threshold(persistent_rec)
-            
-            audio_b64 = res_data.get("audio_b64")
-            if audio_b64:
-                play_audio_response(audio_b64, persistent_rec)
-            
-            # Short pause before starting first user turn
-            time.sleep(0.5)
-        else:
-            print(f"[WARNING] Cold start initiate workflow failed with code {response.status_code}")
-    except requests.exceptions.ConnectionError:
-        print("\n[CRITICAL ERROR] Could not connect to the FastAPI server.")
-        print(f"Please ensure the backend is running locally at http://127.0.0.1:8000")
-        print("Run command: .venv\\Scripts\\uvicorn main:app --reload\n")
-        persistent_rec.stop()
-        sys.exit(1)
-    except Exception as e:
-        print(f"[WARNING] Cold start connection failed: {e}")
+        # Step 4: Ensure Greeting Invocation on Cold Start
+        print("[SYSTEM] Fetching startup greeting workflow...")
+        try:
+            # Clear background queue before initiating request
+            with persistent_rec.lock:
+                persistent_rec.queue.clear()
+
+            response = requests.post(INITIATE_WORKFLOW_URL, json={"session_id": session_id}, timeout=30)
+            if response.status_code == 200:
+                res_data = response.json()
+                if "session_id" in res_data:
+                    session_id = res_data["session_id"]
+                welcome_text = res_data.get("response_text", "")
+                print("\n==========================================")
+                print("        TRANSCRIBE & AGENT SESSION        ")
+                print("==========================================")
+                print(f" Agent (AI)     : {welcome_text}")
+                print("==========================================\n")
+                
+                # Compute and set threshold from server latency window
+                calculate_and_set_threshold(persistent_rec)
+                
+                audio_b64 = res_data.get("audio_b64")
+                if audio_b64:
+                    play_audio_response(audio_b64, persistent_rec)
+                
+                # Short pause before starting first user turn
+                time.sleep(0.5)
+            else:
+                print(f"[WARNING] Cold start initiate workflow failed with code {response.status_code}")
+        except requests.exceptions.ConnectionError:
+            print("\n[CRITICAL ERROR] Could not connect to the FastAPI server.")
+            print(f"Please ensure the backend is running locally at http://127.0.0.1:8000")
+            print("Run command: .venv\\Scripts\\uvicorn main:app --reload\n")
+            if persistent_rec:
+                persistent_rec.stop()
+            sys.exit(1)
+        except Exception as e:
+            print(f"[WARNING] Cold start connection failed: {e}")
     
     while True:
         try:
@@ -206,7 +214,8 @@ def main():
                     requests.post(END_SESSION_URL, data={"session_id": session_id}, timeout=5)
                 except Exception:
                     pass
-                persistent_rec.stop()
+                if persistent_rec:
+                    persistent_rec.stop()
                 sys.exit(0)
                 
             # Stage 1: The Warning Prompt (30 Seconds of Inactivity)
@@ -249,8 +258,9 @@ def main():
             print("[SYSTEM] Processing turn...")
             
             # Clear background queue before starting request
-            with persistent_rec.lock:
-                persistent_rec.queue.clear()
+            if persistent_rec:
+                with persistent_rec.lock:
+                    persistent_rec.queue.clear()
                 
             try:
                 with open(output_file_path, "rb") as f:
@@ -278,7 +288,8 @@ def main():
                     print("==========================================\n")
                     
                     # Compute and set the threshold from the server latency window (Pre-Speech Baseline Lock)
-                    calculate_and_set_threshold(persistent_rec)
+                    if persistent_rec:
+                        calculate_and_set_threshold(persistent_rec)
                     
                     # Automated hands-free playback of agent's audio response
                     audio_b64 = res_data.get("audio_b64")
@@ -319,7 +330,8 @@ def main():
 
         except KeyboardInterrupt:
             print("\nExiting interactive panel. Goodbye!")
-            persistent_rec.stop()
+            if persistent_rec:
+                persistent_rec.stop()
             break
         except Exception as e:
             print(f"[CRITICAL] Unexpected client loop crash: {e}")

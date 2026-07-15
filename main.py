@@ -6,26 +6,36 @@ def normalize_indic_alphanumerics(text: str) -> str:
     if not text:
         return text
 
-    # Base dictionary for mapping
+    # Base dictionary for mapping native and phonetic numbers
     mapping = {
         # Letter replacements
         "ఎస్ హెచ్": "SH",
         "एस एच": "SH",
         "एसएच": "SH",
         
-        # Telugu digits
-        "వన్": "1",
-        "టూ": "2",
-        "త్రీ": "3",
-        "ఫోర్": "4",
-        "ఫైవ్": "5",
+        # Telugu digit words (Phonetic & Native)
+        "వన్": "1", "ఒకటి": "1",
+        "టూ": "2", "రెండు": "2",
+        "త్రీ": "3", "మూడు": "3",
+        "ఫోర్": "4", "నాలుగు": "4",
+        "ఫైవ్": "5", "ఐదు": "5",
+        "సిక్స్": "6", "ఆరు": "6",
+        "సెవెన్": "7", "ఏడు": "7",
+        "ఎయిట్": "8", "ఎనిమిది": "8",
+        "నైన్": "9", "తొమ్మిది": "9",
+        "జీరో": "0", "సున్నా": "0",
         
-        # Hindi digits
-        "वन": "1",
-        "टू": "2",
-        "थ्री": "3",
-        "फोर": "4",
-        "फाइव": "5"
+        # Hindi digit words (Phonetic & Native)
+        "वन": "1", "एक": "1",
+        "टू": "2", "दो": "2",
+        "थ्री": "3", "तीन": "3",
+        "फोर": "4", "चार": "4",
+        "फाइव": "5", "पांच": "5", "पाँच": "5",
+        "सिक्स": "6", "छह": "6", "छः": "6",
+        "सेवन": "7", "सात": "7",
+        "एट": "8", "आठ": "8",
+        "नाइन": "9", "नौ": "9",
+        "जीरो": "0", "शून्य": "0"
     }
 
     normalized = text
@@ -33,9 +43,14 @@ def normalize_indic_alphanumerics(text: str) -> str:
     for pattern in sorted(mapping.keys(), key=len, reverse=True):
         normalized = normalized.replace(pattern, mapping[pattern])
 
-    # Strip spaces between SH and digits (e.g. "SH 123" -> "SH123")
-    normalized = re.sub(r'\bSH\s+(\d+)\b', r'SH\1', normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r'\bSH\s+([a-zA-Z0-9]+)\b', r'SH\1', normalized, flags=re.IGNORECASE)
+    # Convert separated "S H" to "SH"
+    normalized = re.sub(r'\bS\s+H\b', 'SH', normalized, flags=re.IGNORECASE)
+
+    # Collapse all spaces inside tracking IDs (e.g. "SH 7 7 7" -> "SH777")
+    def collapse_sh_spaces(match):
+        return match.group(0).replace(" ", "").replace("\t", "")
+
+    normalized = re.sub(r'\bSH(?:\s+[a-zA-Z0-9]+)+\b', collapse_sh_spaces, normalized, flags=re.IGNORECASE)
 
     return normalized
 
@@ -437,7 +452,7 @@ def classify_intent(text: str) -> str:
         
     # TRACK_SHIPMENT intent (including matching SH tracking ID pattern directly)
     track_words = {
-        "track", "status", "where is", "where's", "shi", "sh1", "sh4", "sh7",
+        "track", "status", "where is", "where's", "tracking",
         "ట్రాక్", "ఎక్కడ", "స్థితి", "స్టేటస్",
         "ट्रैक", "स्थिति", "कहाँ है", "कहा है"
     }
