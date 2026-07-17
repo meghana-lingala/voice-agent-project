@@ -17,6 +17,7 @@ SYSTEM_PROMPT = (
     "Provide clear, short, and professional responses. Do not provide information unrelated to logistics. "
     "Follow these strict behavioral pathways matching these scenarios:\n\n"
     "Scenario 1 (Shipment Tracking):\n"
+    "- If the user wants to track their shipment/order and the tracking ID is missing, politely prompt them to provide the tracking ID (e.g., \"I can help you track your package. Could you please provide your tracking ID?\").\n"
     "- If shipment data is found, state the status, location, and ETA concisely.\n"
     "- If the tracking ID was not found or is invalid, you MUST say exactly: "
     "\"I couldn't find a shipment matching that ID. Please double-check the number and try again.\"\n\n"
@@ -131,10 +132,16 @@ def sanitize_response(response: str) -> str:
 
     return response
 
-def generate_response(user_text: str, session_id: str, context_data: dict = None, mode: str = "general") -> dict:
+def generate_response(user_text: str, session_id: str, context_data: dict = None, mode: str = "general", target_lang: str = None) -> dict:
     """
     Generates a response from the OpenAI gpt-4o-mini model, supporting tool calls.
     Returns a dict with 'ai_response' and 'tool_calls' keys.
+
+    Args:
+        target_lang: BCP-47 language code (e.g. 'te-IN', 'hi-IN', 'en-IN').
+                     When set to an Indic language, an explicit language instruction
+                     is injected so the model always responds in that language,
+                     even when the user's input is Latin-script phonetic text.
     """
     if not client:
         return {
@@ -153,6 +160,27 @@ def generate_response(user_text: str, session_id: str, context_data: dict = None
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT}
     ]
+
+    # Inject explicit language instruction when session is locked to an Indic language.
+    # This is critical for Latin-script phonetic input (e.g. "Naa aader, Ekkedundi?")
+    # where the model cannot infer the target language from the text alone.
+    if target_lang:
+        lang_lower = target_lang.lower()
+        if lang_lower.startswith("te"):
+            lang_instruction = (
+                "IMPORTANT: The user is communicating in Telugu. You MUST respond "
+                "exclusively in Telugu script (\u0c24\u0c46\u0c32\u0c41\u0c17\u0c41). Do NOT respond in English or any other language."
+            )
+        elif lang_lower.startswith("hi"):
+            lang_instruction = (
+                "IMPORTANT: The user is communicating in Hindi. You MUST respond "
+                "exclusively in Hindi script (\u0939\u093f\u0902\u0926\u0940). Do NOT respond in English or any other language."
+            )
+        else:
+            lang_instruction = None
+
+        if lang_instruction:
+            messages.append({"role": "system", "content": lang_instruction})
 
     # Add historical messages (limit to last 10 turns)
     for msg in history:

@@ -225,12 +225,12 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(lang, "hi-IN")
         
         # 4. Update state again (which updates the existing log entry)
-        database.update_session_state("session_state_test", "OFFER_ADDITIONAL_ASSISTANCE", {"pickup_location": "Hyderabad", "delivery_date": "tomorrow"}, "te-IN")
+        database.update_session_state("session_state_test", "OFFER_ADDITIONAL_ASSISTANCE", {"pickup_location": "Hyderabad", "pickup_time": "tomorrow"}, "te-IN")
         
         # 5. Retrieve and verify update
         stage, slots, lang = database.get_session_state("session_state_test")
         self.assertEqual(stage, "OFFER_ADDITIONAL_ASSISTANCE")
-        self.assertEqual(slots, {"pickup_location": "Hyderabad", "delivery_date": "tomorrow"})
+        self.assertEqual(slots, {"pickup_location": "Hyderabad", "pickup_time": "tomorrow"})
         self.assertEqual(lang, "te-IN")
 
 if __name__ == '__main__':

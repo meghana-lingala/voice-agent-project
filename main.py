@@ -1,131 +1,5 @@
 import os
-def normalize_indic_alphanumerics(text: str) -> str:
-    """
-    Normalizes Telugu and Hindi phonetic letters and digits to standard English alpha-numerics.
-    """
-    if not text:
-        return text
 
-    # Base dictionary for mapping native and phonetic numbers
-    mapping = {
-        # Letter replacements
-        "ఎస్ హెచ్": "SH",
-        "एस एच": "SH",
-        "एसएच": "SH",
-        
-        # Telugu digit words (Phonetic & Native)
-        "వన్": "1", "ఒకటి": "1",
-        "టూ": "2", "రెండు": "2",
-        "త్రీ": "3", "మూడు": "3",
-        "ఫోర్": "4", "నాలుగు": "4",
-        "ఫైవ్": "5", "ఐదు": "5",
-        "సిక్స్": "6", "ఆరు": "6",
-        "సెవెన్": "7", "ఏడు": "7",
-        "ఎయిట్": "8", "ఎనిమిది": "8",
-        "నైన్": "9", "తొమ్మిది": "9",
-        "జీరో": "0", "సున్నా": "0",
-        
-        # Hindi digit words (Phonetic & Native)
-        "वन": "1", "एक": "1",
-        "टू": "2", "दो": "2",
-        "थ्री": "3", "तीन": "3",
-        "फोर": "4", "चार": "4",
-        "फाइव": "5", "पांच": "5", "पाँच": "5",
-        "सिक्स": "6", "छह": "6", "छः": "6",
-        "सेवन": "7", "सात": "7",
-        "एट": "8", "आठ": "8",
-        "नाइन": "9", "नौ": "9",
-        "जीरो": "0", "शून्य": "0"
-    }
-
-    normalized = text
-    # Apply replacements (longest patterns first to avoid partial matching issues)
-    for pattern in sorted(mapping.keys(), key=len, reverse=True):
-        normalized = normalized.replace(pattern, mapping[pattern])
-
-    # Convert separated "S H" to "SH"
-    normalized = re.sub(r'\bS\s+H\b', 'SH', normalized, flags=re.IGNORECASE)
-
-    # Collapse all spaces inside tracking IDs (e.g. "SH 7 7 7" -> "SH777")
-    def collapse_sh_spaces(match):
-        return match.group(0).replace(" ", "").replace("\t", "")
-
-    normalized = re.sub(r'\bSH(?:\s*\d)+\b', collapse_sh_spaces, normalized, flags=re.IGNORECASE)
-
-    return normalized
-
-def get_localized_tracking_response(tracking_id: str, status: str, location: str, lang_key: str) -> str:
-    """
-    Builds the localized tracking response based on template format.
-    """
-    # Status localized translations
-    status_map = {
-        "te": {
-            "in transit": "ఇన్ ట్రాన్సిట్",
-            "out for delivery": "డెలివరీ కోసం అవుట్",
-            "delayed": "ఆలస్యం",
-            "cancelled": "రద్దు",
-            "created": "సృష్టించబడింది"
-        },
-        "hi": {
-            "in transit": "इन ट्रांजिट",
-            "out for delivery": "डिलीवरी के लिए बाहर",
-            "delayed": "देरी",
-            "cancelled": "रद्द",
-            "created": "तैयार"
-        },
-        "en": {
-            "in transit": "In Transit",
-            "out for delivery": "Out for Delivery",
-            "delayed": "Delayed",
-            "cancelled": "Cancelled",
-            "created": "Created"
-        }
-    }
-
-    # Location localized translations
-    location_map = {
-        "te": {
-            "hyderabad": "హైదరాబాద్",
-            "ghatkesar": "ఘట్కేసర్",
-            "delhi hub": "ఢిల్లీ హబ్",
-            "origin depot": "ఆరిజిన్ డిపో"
-        },
-        "hi": {
-            "hyderabad": "हैदराबाद",
-            "ghatkesar": "घटकेसर",
-            "delhi hub": "दिल्ली हब",
-            "origin depot": "ओरिजिन डिपो"
-        },
-        "en": {
-            "hyderabad": "Hyderabad",
-            "ghatkesar": "Ghatkesar",
-            "delhi hub": "Delhi Hub",
-            "origin depot": "Origin Depot"
-        }
-    }
-
-    # Normalize inputs
-    status_key = status.lower()
-    location_key = location.lower()
-    
-    # Resolve correct language code (e.g. te-IN or te -> te)
-    l_key = "en"
-    if "te" in lang_key.lower() or "telugu" in lang_key.lower():
-        l_key = "te"
-    elif "hi" in lang_key.lower() or "hindi" in lang_key.lower():
-        l_key = "hi"
-
-    # Map status and location
-    mapped_status = status_map[l_key].get(status_key, status)
-    mapped_location = location_map[l_key].get(location_key, location)
-
-    if l_key == "te":
-        return f"మీ రవాణా పొట్లం పొడవునా చూస్తే, ఐడి {tracking_id} ప్రస్తుతం {mapped_location} లో {mapped_status} లో ఉంది."
-    elif l_key == "hi":
-        return f"आपका शिपमेंट {tracking_id} वर्तमान में {mapped_location} में {mapped_status} में है। "
-    else:
-        return f"Your shipment {tracking_id} is currently {mapped_status} at the {mapped_location} hub."
 
 import io
 import tempfile
@@ -138,7 +12,7 @@ import random
 import json
 import uuid
 
-import webrtcvad
+
 import stt_services
 from transcript_logger import log_transcript
 import database
@@ -190,13 +64,26 @@ def get_language_from_code_or_name(lang: str) -> str:
         return "hi"
     return "en"
 
-UNIVERSAL_FILLER_WORDS = {"hello", "hi", "hey", "ok", "okay", "thank you", "thanks", "bye", "goodbye", "yes", "no", "sure"}
+# Words/phrases that must NEVER trigger a language switch on their own.
+# Includes English logistics loanwords freely used inside Hindi/Telugu conversation.
+UNIVERSAL_FILLER_WORDS = {
+    "hello", "hi", "hey", "ok", "okay", "thank you", "thanks", "bye", "goodbye",
+    "yes", "no", "sure",
+    # English logistics loanwords commonly used as loanwords in Hindi/Telugu
+    "order", "delivery", "shipment", "status", "track", "tracking",
+    "cancel", "schedule", "pickup", "pick", "up", "parcel", "courier", "package",
+    # General acknowledgment loanwords
+    "please", "fine"
+}
 
 def detect_language_override(text: str) -> str | None:
     """
     Screens the transcript for explicit language switch phrases.
     Returns: "English", "Telugu", "Hindi", or None if no override keyword is found.
-    Bypasses override check if text consists purely of numbers/digits and/or tokens in UNIVERSAL_FILLER_WORDS.
+    Bypasses override check if text consists purely of:
+      - numbers/digits
+      - tokens in UNIVERSAL_FILLER_WORDS
+      - SH-prefixed tracking IDs (e.g. SH784 -> remaining token 'sh' after digit strip)
     """
     if not text:
         return None
@@ -205,29 +92,130 @@ def detect_language_override(text: str) -> str | None:
     cleaned = text.lower().strip()
     punctuation = '.,?!;:"\'()[]{}<>-।`~@#$%^&*_+='
     cleaned = "".join(c for c in cleaned if c not in punctuation)
-    
+
     # Strip digits/numbers
     cleaned_no_digits = re.sub(r'\d+', '', cleaned)
-    
+
     # Extract words
     words = cleaned_no_digits.split()
-    
-    # Check if all remaining words are in UNIVERSAL_FILLER_WORDS
-    if not words or all(w in UNIVERSAL_FILLER_WORDS for w in words):
+
+    # Tracking-ID prefix bypass: after stripping digits, only 'sh' remains → it's a bare
+    # tracking ID like "SH784". Never let this trigger a language switch.
+    # Also absorb the case where the full token is the SH-prefix of a multi-word ID.
+    TRACKING_PREFIXES = {"sh"}
+
+    # Check if all remaining words are in UNIVERSAL_FILLER_WORDS or tracking prefixes
+    if not words or all(w in UNIVERSAL_FILLER_WORDS or w in TRACKING_PREFIXES for w in words):
         return None
 
     text_lower = text.lower()
-    # Check English
-    if "switch to english" in text_lower or "speak in english" in text_lower or "english translation" in text_lower or "अंग्रेजी में बोलो" in text_lower or "ఇంగ్లీష్" in text_lower:
+    # Explicit English switch phrases only
+    if ("switch to english" in text_lower or "speak in english" in text_lower
+            or "english translation" in text_lower or "अंग्रेजी में बोलो" in text_lower
+            or "ఇంగ్లీష్" in text_lower):
         return "English"
-    # Check Telugu
-    if "telugu to change" in text_lower or "speak in telugu" in text_lower or "switch to telugu" in text_lower or "telugu lo matladu" in text_lower or "తెలుగులో మాట్లాడు" in text_lower or "తెలుగు" in text_lower:
+    # Explicit Telugu switch phrases only
+    if ("telugu to change" in text_lower or "speak in telugu" in text_lower
+            or "switch to telugu" in text_lower or "telugu lo matladu" in text_lower
+            or "తెలుగులో మాట్లాడు" in text_lower or "తెలుగు" in text_lower):
         return "Telugu"
-    # Check Hindi
-    if "hindi lo matladu" in text_lower or "speak in hindi" in text_lower or "switch to hindi" in text_lower or "hindi mein bolo" in text_lower or "हिंदी में बोलो" in text_lower or "हिंदी" in text_lower:
+    # Explicit Hindi switch phrases only
+    if ("hindi lo matladu" in text_lower or "speak in hindi" in text_lower
+            or "switch to hindi" in text_lower or "hindi mein bolo" in text_lower
+            or "हिंदी में बोलो" in text_lower or "हिंदी" in text_lower):
         return "Hindi"
     return None
 
+
+# ---------------------------------------------------------------------------
+# Latin-script phonetic Indic anchor classifier
+# ---------------------------------------------------------------------------
+# These are conversational anchor words commonly transcribed in Latin script
+# by STT engines when users speak Telugu or Hindi phonetically.
+_LATIN_TELUGU_ANCHORS = {
+    # Pronouns / demonstratives
+    "naa", "nenu", "meeru", "mee", "adi", "ika", "ikkade", "akka", "akade",
+    # Question words
+    "ekkada", "ekka", "enti", "ela", "enduku", "evaru", "evaraina",
+    # Logistics / conversational verbs & adverbs
+    "undu", "undi", "unnaru", "ledu", "cheyyi", "cheyandi", "cheyagalaru",
+    "pampinchu", "telusukovalani", "ekkalumdu",
+    # Particles / connectors
+    "dar", "lo", "ki", "tho", "lo", "gariki", "ani", "ayindi",
+    # Common verbs
+    "chudandi", "chepandi", "vellu", "vellandi",
+}
+
+_LATIN_HINDI_ANCHORS = {
+    # Pronouns / demonstratives
+    "mera", "meri", "mere", "mujhe", "hum", "aap", "aapka", "aapki",
+    "yeh", "woh", "kya", "kaun", "kahan", "kab", "kyun",
+    # Logistics / conversational words
+    "hai", "hain", "nahi", "nahin", "tha", "thi",
+    "kider", "kidhar", "udhar", "idhar",
+    "kal", "aaj", "abhi", "phir", "bhi", "bhai", "yaar",
+    # Question / request particles
+    "batao", "bataiye", "dijiye", "karo", "karein", "chahiye", "chahie",
+    # Acknowledgment
+    "theek", "theekh", "accha", "haan", "ji",
+}
+
+
+def detect_latin_indic_language(text: str) -> str | None:
+    """
+    Detects whether Latin-script text is phonetically Hindi or Telugu.
+
+    Called when the STT returns Latin-script text that may be a speech
+    transcription of Hindi or Telugu (e.g. "Naa dar ekkalumdu?").
+
+    Returns:
+        "hi-IN"  if Hindi anchor words are found
+        "te-IN"  if Telugu anchor words are found
+        None     if no Indic anchors are detected
+
+    Telugu takes precedence over Hindi if both sets match (because Telugu
+    anchors are more distinctive).  If only Hindi anchors match, returns Hindi.
+    """
+    if not text:
+        return None
+
+    words = set(re.sub(r'[^a-z\s]', '', text.lower()).split())
+    if not words:
+        return None
+
+    telugu_hits = words & _LATIN_TELUGU_ANCHORS
+    hindi_hits  = words & _LATIN_HINDI_ANCHORS
+
+    if telugu_hits:
+        return "te-IN"
+    if hindi_hits:
+        return "hi-IN"
+    return None
+
+
+def detect_native_script_language(text: str) -> str | None:
+    """
+    Detects the dominant language from native Unicode script characters.
+
+    Uses character-count dominance so mixed-script inputs like
+    "मेरी ఆర్డర్ किधर है?" (mostly Devanagari with one Telugu loanword)
+    are correctly classified as Hindi rather than Telugu.
+
+    Returns:
+        "te-IN"  if Telugu characters (U+0C00-U+0C7F) dominate
+        "hi-IN"  if Devanagari characters (U+0900-U+097F) dominate
+        None     if neither script has any characters
+    """
+    if not text:
+        return None
+    telugu_count     = sum(1 for c in text if '\u0c00' <= c <= '\u0c7f')
+    devanagari_count = sum(1 for c in text if '\u0900' <= c <= '\u097f')
+    if telugu_count == 0 and devanagari_count == 0:
+        return None
+    # The dominant script wins. Ties go to Telugu (more distinctive Unicode block).
+    if telugu_count >= devanagari_count and telugu_count > 0:
+        return "Telugu"
+    return "Hindi"
 
 def match_conversational_phrase(text: str) -> str | None:
     """
@@ -300,54 +288,70 @@ def get_localized_phrase_response(phrase_type: str, lang_key: str) -> str:
 def normalize_indic_alphanumerics(text: str) -> str:
     """
     Normalizes Telugu and Hindi phonetic letters and digits to standard English alpha-numerics.
+
+    Sarvam STT commonly transcribes spoken digits as a mix of:
+      - ASCII digits      ("SH123")
+      - Hindi words       ("SH45sisix" or "SH45सिक्स।")
+      - Telugu words      ("SH ఆరు")
+    This function converts all known representations to pure ASCII digits so
+    that the SH\\d{3} regex can match the normalized string reliably.
     """
     if not text:
         return text
 
-    # Base dictionary for mapping
     mapping = {
-        # Letter replacements
-        "エス ヘッチ": "SH",
-        "ఎస్ హెచ్": "SH",
-        "एस एच": "SH",
-        "एसएच": "SH",
-        "s.h.": "SH",
-        "s h": "SH",
-        "s-h": "SH",
-        
-        # Telugu digits
-        "వన్": "1",
-        "ఒన్": "1",
-        "టూ": "2",
-        "త్రీ": "3",
-        "ఫోర్": "4",
-        "ఫైవ్": "5",
-        
-        # Hindi digits
-        "वन": "1",
-        "टू": "2",
-        "थ्री": "3",
-        "फोर": "4",
-        "फाइव": "5"
+        # SH prefix variants
+        "ఎస్ హెచ్": "SH", "एस एच": "SH", "एसएच": "SH",
+        "s.h.": "SH", "s h": "SH", "s-h": "SH",
+
+        # ── Hindi digit mapping (Phonetic borrowings only to avoid vocabulary clashes) ──
+        "जीरो":   "0",  "ज़ीरो":  "0",  "ज़ीरो":   "0",  "शून्य":  "0",
+        "वन":     "1",
+        "टू":     "2",
+        "थ्री":   "3",
+        "फोर":    "4",
+        "फाइव":   "5",
+        "सिक्स":  "6",
+        "सेवन":   "7",
+        "एट":     "8",
+        "नाइन":   "9",
+
+        # ── Telugu digit mapping (Phonetic borrowings only to avoid vocabulary clashes) ──
+        "సున్న":   "0",  "సున్నా":  "0",  "జీరో":   "0",  "జిరో":   "0",
+        "వన్":     "1",  "ఒన్":    "1",
+        "టూ":      "2",
+        "త్రీ":    "3",
+        "ఫోర్":    "4",
+        "ఫైవ్":    "5",
+        "సిక్స్":  "6",
+        "సెవెన్":  "7",
+        "ఎట్":     "8",  "ఎయిట్":  "8",
+        "నైన్":    "9",
     }
 
-    # Case-insensitive replacement helper
-    def replace_case_insensitive(s, old, new):
-        pattern = re.compile(re.escape(old), re.IGNORECASE)
-        return pattern.sub(new, s)
+    def replace_case_insensitive(s: str, old: str, new: str) -> str:
+        return re.compile(re.escape(old), re.IGNORECASE).sub(new, s)
 
     normalized = text
-    # Apply replacements (longest patterns first)
+    # Apply replacements longest-first so multi-syllable words win
     for pattern in sorted(mapping.keys(), key=len, reverse=True):
         normalized = replace_case_insensitive(normalized, pattern, mapping[pattern])
 
-    # Collapse spaces in any "SH" followed by digits (e.g. "SH 1 2 3" -> "SH123")
-    def collapse_sh_spaces(match):
-        return match.group(0).replace(" ", "").replace("\t", "").upper()
+    # Strip Devanagari/Telugu sentence-end punctuation (।॥) that Sarvam appends
+    # ONLY when they appear immediately adjacent to an SH tracking ID pattern,
+    # e.g. "SH45सिक्स।" → "SH456" but NOT "नमस्ते।" → "नमस्ते"
+    normalized = re.sub(r'(?i)(SH[\w\s]*\d)[।॥]+', r'\1', normalized)
+    normalized = re.sub(r'(?i)[।॥]+(SH[\w\s]*\d)', r'\1', normalized)
 
-    normalized = re.sub(r'(?i)\bSH[\s\d]+', collapse_sh_spaces, normalized)
+    # Collapse spaces/hyphens between "SH" and digit runs
+    # e.g. "SH 4 5 6" -> "SH456",  "SH45 6" -> "SH456"
+    def collapse_sh_spaces(match: re.Match) -> str:
+        return re.sub(r'[\s\-]+', '', match.group(0)).upper()
+
+    normalized = re.sub(r'(?i)\bSH[\s\d\-]+', collapse_sh_spaces, normalized)
 
     return normalized
+
 
 def get_localized_tracking_response(tracking_id: str, status: str, location: str, lang_key: str) -> str:
     """
@@ -454,7 +458,11 @@ def classify_intent(text: str) -> str:
     track_words = {
         "track", "status", "where is", "where's", "tracking",
         "ట్రాక్", "ఎక్కడ", "స్థితి", "స్టేటస్",
-        "ट्रैक", "स्थिति", "कहाँ है", "कहा है"
+        "ट्रैक", "स्थिति", "कहाँ है", "कहा है",
+        # Phonetic Latin script tracking anchors
+        "ekkadundi", "ekkedundi", "ekkleundi", "ekkalumdu", "ekkada", "ekka",
+        "kahan", "kidhar", "kider", "kaha",
+        "my order", "naa order", "naa aader", "mera order", "meri order"
     }
     if any(w in t for w in track_words) or re.search(r"SH\d{3}", text, re.IGNORECASE):
         return "TRACK_SHIPMENT"
@@ -497,6 +505,8 @@ def is_off_topic_query(text: str) -> bool:
     # Check for gibberish (e.g. no vowels in a word of length >= 4)
     words = t.split()
     for w in words:
+        if any(c.isdigit() for c in w):
+            continue
         if len(w) >= 4 and not any(v in w for v in "aeiouy\u0c05\u0c06\u0c07\u0c08\u0c09\u0c0a\u0c0b\u0c0c\u0c0e\u0c0f\u0c10\u0c12\u0c13\u0c14\u0905\u0906\u0907\u0908\u0909\u090a\u090b\u090c\u090f\u0910\u0913\u0914"):
             return True
     return False
@@ -522,7 +532,7 @@ async def initiate_workflow(data: dict = Body(None)):
     database.update_session_state(session_id, "GREETING", {}, "en-IN")
     active_workflow_sessions.add(session_id)
     
-    welcome_text = "Hello! Welcome to Colaberry Logistics Support. How may I assist you today?"
+    welcome_text = "Hello! Welcome to LogiRoute Express. How may I assist you today?"
     audio_b64 = tts_service.generate_speech_b64(text=welcome_text, target_language_code="en-IN")
     
     return {
@@ -562,11 +572,11 @@ async def transcribe(
     if len(audio_data) == 0:
         raise HTTPException(status_code=400, detail="No speech detected. Please try again.")
 
-    # webrtcvad only supports 8000, 16000, 32000, 48000 Hz
+    # Audio sample rate validation (VAD/STT requires standard rates)
     if samplerate not in (8000, 16000, 32000, 48000):
         raise HTTPException(
             status_code=400,
-            detail=f"webrtcvad does not support audio sample rate {samplerate}. Must be 8kHz, 16kHz, 32kHz, or 48kHz."
+            detail=f"Unsupported audio sample rate {samplerate}. Must be 8kHz, 16kHz, 32kHz, or 48kHz."
         )
 
     # Convert to mono if multichannel
@@ -597,7 +607,7 @@ async def transcribe(
                 elif cached_lang == "Hindi" or cached_lang.startswith("hi"):
                     active_lang = "hi-IN"
                 elif cached_lang == "English" or cached_lang.startswith("en"):
-                    active_lang = "en-IN"
+                    active_lang = "auto"
                 else:
                     active_lang = cached_lang
 
@@ -606,21 +616,21 @@ async def transcribe(
             engine_used = result["telemetry"]["engine_used"]
             logged_lang = result["telemetry"].get("detected_language", "auto")
         elif active_lang.startswith("en"):
-            engine_used = "Groq"
-            result = stt_services.transcribe_english(temp_file_path)
-            logged_lang = language_code if language_code != "auto" else "English"
+            engine_used = "Sarvam"
+            result = stt_services.transcribe_sarvam(temp_file_path, language_code="en-IN")
+            logged_lang = "English"
         elif active_lang.startswith("te"):
             engine_used = "Sarvam"
-            result = stt_services.transcribe_indic(temp_file_path, language_code="te-IN")
-            logged_lang = language_code if language_code != "auto" else "Telugu"
+            result = stt_services.transcribe_sarvam(temp_file_path, language_code="te-IN")
+            logged_lang = "Telugu"
         elif active_lang.startswith("hi"):
             engine_used = "Sarvam"
-            result = stt_services.transcribe_indic(temp_file_path, language_code="hi-IN")
-            logged_lang = language_code if language_code != "auto" else "Hindi"
+            result = stt_services.transcribe_sarvam(temp_file_path, language_code="hi-IN")
+            logged_lang = "Hindi"
         else:
             engine_used = "Sarvam"
-            result = stt_services.transcribe_indic(temp_file_path, language_code=active_lang)
-            logged_lang = language_code if language_code != "auto" else active_lang
+            result = stt_services.transcribe_sarvam(temp_file_path, language_code=active_lang)
+            logged_lang = active_lang
 
         transcript = result["transcript"]
         duration = result["telemetry"]["duration_seconds"]
@@ -640,6 +650,7 @@ async def transcribe(
             # Check for user override phrase to explicitly transition the sticky session language
             override_lang = detect_language_override(transcript)
             if override_lang:
+                # Explicit switch command found — honour it
                 if override_lang == "Telugu":
                     logged_lang = "te-IN"
                 elif override_lang == "Hindi":
@@ -649,47 +660,101 @@ async def transcribe(
                 else:
                     logged_lang = override_lang
             else:
-                if cached_lang:
+                # -------------------------------------------------------------------
+                # Sticky Language Gate — INDIC-ONLY enforcement
+                # Only enforce a hard lock when the session is already locked to a
+                # specific Indic language (hi-IN / te-IN). If the session is in its
+                # initial English state (en-IN from initiate_workflow) or has no
+                # cached language yet, allow native-script and Latin phonetic
+                # detection to upgrade it to the correct Indic language.
+                # -------------------------------------------------------------------
+                _is_indic_lock = cached_lang and (
+                    cached_lang == "Telugu" or cached_lang.lower().startswith("te") or
+                    cached_lang == "Hindi"  or cached_lang.lower().startswith("hi")
+                )
+
+                if _is_indic_lock:
+                    # Hard Indic lock — prevent any English reclassification
                     if cached_lang == "Telugu" or cached_lang.lower().startswith("te"):
                         logged_lang = "te-IN"
-                    elif cached_lang == "Hindi" or cached_lang.lower().startswith("hi"):
-                        logged_lang = "hi-IN"
-                    elif cached_lang == "English" or cached_lang.lower().startswith("en"):
-                        logged_lang = "en-IN"
                     else:
-                        logged_lang = cached_lang
+                        logged_lang = "hi-IN"
                 else:
-                    logged_lang = active_lang
+                    # No hard Indic lock yet (fresh session or initial en-IN).
+                    # Priority order: native script > Latin phonetic > STT result
+                    native_lang = detect_native_script_language(transcript)
+                    if native_lang:
+                        logged_lang = native_lang
+                    else:
+                        latin_indic = detect_latin_indic_language(transcript)
+                        if latin_indic:
+                            logged_lang = latin_indic
+                        else:
+                            # No Indic signal — keep whatever active_lang resolved to
+                            logged_lang = active_lang
         else:
             current_stage = "GREETING"
             pending_slots = {}
             cached_lang = database.get_session_language(session_id)
-            
+
             override_lang = detect_language_override(transcript)
             if override_lang:
                 logged_lang = override_lang
             else:
-                if cached_lang:
+                # -------------------------------------------------------------------
+                # Sticky Language Gate (non-workflow path) — Indic-only enforcement
+                # Same rule: only hard-lock when session is Indic. Allow native script
+                # and Latin phonetic detection to upgrade from the default en-IN.
+                # -------------------------------------------------------------------
+                _is_indic_lock = cached_lang and (
+                    cached_lang == "Telugu" or cached_lang.lower().startswith("te") or
+                    cached_lang == "Hindi"  or cached_lang.lower().startswith("hi")
+                )
+
+                if _is_indic_lock:
                     if cached_lang == "Telugu" or cached_lang.lower().startswith("te"):
                         logged_lang = "te-IN"
-                    elif cached_lang == "Hindi" or cached_lang.lower().startswith("hi"):
+                    else:
                         logged_lang = "hi-IN"
-                    elif cached_lang == "English" or cached_lang.lower().startswith("en"):
-                        logged_lang = "en-IN"
-                    else:
-                        logged_lang = cached_lang
                 else:
-                    if language_code == "auto":
-                        logged_lang = result["telemetry"].get("detected_language", "English")
+                    # No hard Indic lock yet (fresh session or initial en-IN).
+                    #
+                    # Priority logic:
+                    # 1. If language_code == "auto": the STT engine already ran its
+                    # Trust the STT auto-detection if it already identified Telugu or Hindi
+                    telemetry_lang = result["telemetry"].get("detected_language", "English")
+                    if language_code == "auto" and (telemetry_lang == "Telugu" or telemetry_lang == "Hindi"):
+                        logged_lang = telemetry_lang
                     else:
-                        if active_lang.startswith("en"):
-                            logged_lang = language_code if language_code != "auto" else "English"
-                        elif active_lang.startswith("te"):
-                            logged_lang = language_code if language_code != "auto" else "Telugu"
-                        elif active_lang.startswith("hi"):
-                            logged_lang = language_code if language_code != "auto" else "Hindi"
+                        # Otherwise run native script detection first
+                        native_lang = detect_native_script_language(transcript)
+                        if native_lang:
+                            logged_lang = native_lang
                         else:
-                            logged_lang = language_code if language_code != "auto" else active_lang
+                            # Try Latin phonetic anchor detection
+                            latin_indic = detect_latin_indic_language(transcript)
+                            if latin_indic:
+                                logged_lang = latin_indic
+                            else:
+                                if language_code == "auto":
+                                    logged_lang = telemetry_lang
+                                else:
+                                    if active_lang.startswith("en"):
+                                        logged_lang = language_code
+                                    elif active_lang.startswith("te"):
+                                        logged_lang = language_code
+                                    elif active_lang.startswith("hi"):
+                                        logged_lang = language_code
+                                    else:
+                                        logged_lang = language_code
+
+        # Standardize language names to English, Hindi, Telugu
+        if "te" in logged_lang.lower() or "telugu" in logged_lang.lower():
+            logged_lang = "Telugu"
+        elif "hi" in logged_lang.lower() or "hindi" in logged_lang.lower():
+            logged_lang = "Hindi"
+        else:
+            logged_lang = "English"
 
         ai_response = None
         tool_calls = None
@@ -730,12 +795,16 @@ async def transcribe(
             elif current_stage == "OFFER_ADDITIONAL_ASSISTANCE" and intent == "GOODBYE":
                 current_stage = "COMPLETED"
                 if "te" in logged_lang.lower():
-                    ai_response = "కొలాబెర్రీ లాజిస్టిక్స్ సపోర్ట్‌ను సంప్రదించినందుకు ధన్యవాదాలు! మీ రోజు బాగుండాలని కోరుకుంటున్నాను."
+                    ai_response = "లాజిరూట్ ఎక్స్‌ప్రెస్‌ను సంప్రదించినందుకు ధన్యవాదాలు! మీ రోజు బాగుండాలని కోరుకుంటున్నాను."
                 elif "hi" in logged_lang.lower():
-                    ai_response = "कोलैबेरी लॉजिस्टिक्स सपोर्ट से संपर्क करने के लिए धन्यवाद! आपका दिन शुभ हो।"
+                    ai_response = "लॉजीरूट एक्सप्रेस से संपर्क करने के लिए धन्यवाद! आपका दिन शुभ हो।"
                 else:
-                    ai_response = "Thank you for contacting Colaberry Logistics Support. Have a great day!"
+                    ai_response = "Thank you for contacting LogiRoute Express. Have a great day!"
                 database.update_session_state(session_id, current_stage, {}, logged_lang)
+                # Fix #4 — GOODBYE cleanup: remove session from the in-memory workflow
+                # set so it doesn't accumulate unboundedly across long-running servers.
+                active_workflow_sessions.discard(session_id)
+                new_session_id = str(uuid.uuid4())
 
             elif intent == "TRACK_SHIPMENT" or current_stage == "WAITING_FOR_TRACKING_ID":
                 match = re.search(r"SH\d{3}", transcript, re.IGNORECASE)
@@ -778,17 +847,50 @@ async def transcribe(
                     weight_match = re.search(r'\b(\d+(?:\.\d+)?\s*(?:kg|kgs|kilogram|kilograms|lbs|pounds|కేజీ|కేజీలు|కిలో|కిలోలు|किलो|किलोग्राम|g))\b', transcript, re.IGNORECASE)
                     if weight_match:
                         pending_slots["package_weight"] = weight_match.group(0)
-                    date_match = re.search(r'\b(tomorrow|today|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday|రేపు|ఈ రోజు|కల్|आज|परसों)\b', transcript, re.IGNORECASE)
-                    if date_match:
-                        pending_slots["delivery_date"] = date_match.group(0)
-                    loc_match = re.search(r'\b(hyderabad|ghatkesar|delhi|mumbai|kphb|hitech city|secunderabad|బెంగళూరు|వరంగల్|मुंबई|दिल्ली|हैदराबाद|बेंगलुरु)\b', transcript, re.IGNORECASE)
-                    if loc_match:
-                        pending_slots["pickup_location"] = loc_match.group(0)
+                    
+                    # Extract pickup location
+                    pickup_match = re.search(r'\b(?:from|at|pickup|ఆఫీస్|నుండి|నుంచి|సే|में)\s+([A-Za-z\u0c00-\u0c7f\u0900-\u097f][\w\s]{2,20}?)(?:\s+to|\s+and|\s+for|\s+ద్వారా|\s+కోసం|\s+కే|\s+సే|\.|\b)', transcript, re.IGNORECASE)
+                    if pickup_match:
+                        val = pickup_match.group(1).strip()
+                        if not any(w in val.lower() for w in ["schedule", "pickup", "delivery", "track", "shipment", "order", "cancel", "help"]):
+                            pending_slots["pickup_location"] = val
+                    
+                    if not pending_slots.get("pickup_location"):
+                        loc_match = re.search(r'\b(hyderabad|ghatkesar|delhi|mumbai|kphb|hitech city|secunderabad|బెంగళూరు|వరంగల్|मुंबई|दिल्ली|हैदराबाद|बेंगलुरु)\b', transcript, re.IGNORECASE)
+                        if loc_match:
+                            pending_slots["pickup_location"] = loc_match.group(0)
+
+                    # Extract drop location
+                    drop_match = re.search(r'\b(?:to|for|destination|deliver to|చేరాలి|చేరవలసిన|కు|కి|కోసం|तक|को|के लिए)\s+([A-Za-z\u0c00-\u0c7f\u0900-\u097f][\w\s]{2,20}?)(?:\s+from|\s+and|\.|\b)', transcript, re.IGNORECASE)
+                    if drop_match:
+                        val = drop_match.group(1).strip()
+                        if not any(w in val.lower() for w in ["schedule", "pickup", "delivery", "track", "shipment", "order", "cancel", "help"]):
+                            pending_slots["drop_location"] = val
+                    
+                    if not pending_slots.get("drop_location"):
+                        cities = re.findall(r'\b(hyderabad|ghatkesar|delhi|mumbai|kphb|hitech city|secunderabad|బెంగళూరు|వరంగల్|मुंबई|दिल्ली|हैदराबाद|बेंगलुरु)\b', transcript, re.IGNORECASE)
+                        pickup_val = pending_slots.get("pickup_location", "").lower()
+                        for c in cities:
+                            if c.lower() != pickup_val:
+                                pending_slots["drop_location"] = c
+                                break
+
+                    # Extract pickup time if mentioned
+                    time_match = re.search(
+                        r'\b(?:tomorrow|today|tonight|morning|evening|afternoon|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:at|on|by)?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?'
+                        r'|\b\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM|గంటలకు|बजे)'
+                        r'|\b(?:tomorrow|today|tonight|రేపు|ఈరోజు|సాయంత్రం|ఉదయం|మధ్యాహ్నం|कल|आज|सुबह|शाम|दोपहर)\b',
+                        transcript, re.IGNORECASE
+                    )
+                    if time_match:
+                        pending_slots["pickup_time"] = time_match.group(0)
                 else:
                     if current_stage == "PICKUP_WAITING_FOR_LOCATION":
                         pending_slots["pickup_location"] = transcript
-                    elif current_stage == "PICKUP_WAITING_FOR_DATE":
-                        pending_slots["delivery_date"] = transcript
+                    elif current_stage == "PICKUP_WAITING_FOR_DROP_LOCATION":
+                        pending_slots["drop_location"] = transcript
+                    elif current_stage == "PICKUP_WAITING_FOR_TIME":
+                        pending_slots["pickup_time"] = transcript
                     elif current_stage == "PICKUP_WAITING_FOR_WEIGHT":
                         pending_slots["package_weight"] = transcript
 
@@ -800,14 +902,22 @@ async def transcribe(
                         ai_response = "कृपया पिकअप स्थान प्रदान करें।"
                     else:
                         ai_response = "Please provide the pickup location."
-                elif not pending_slots.get("delivery_date"):
-                    current_stage = "PICKUP_WAITING_FOR_DATE"
+                elif not pending_slots.get("drop_location"):
+                    current_stage = "PICKUP_WAITING_FOR_DROP_LOCATION"
                     if "te" in logged_lang.lower():
-                        ai_response = "దయచేసి డెలివరీ తేదీని అందించండి."
+                        ai_response = "దయచేసి డ్రాప్ లొకేషన్‌ను అందించండి."
                     elif "hi" in logged_lang.lower():
-                        ai_response = "कृपया डिलीवरी की तारीख प्रदान करें।"
+                        ai_response = "कृपया गंतव्य स्थान (ड्रॉप लोकेशन) प्रदान करें।"
                     else:
-                        ai_response = "Please provide the delivery date."
+                        ai_response = "Please provide the drop location."
+                elif not pending_slots.get("pickup_time"):
+                    current_stage = "PICKUP_WAITING_FOR_TIME"
+                    if "te" in logged_lang.lower():
+                        ai_response = "దయచేసి పికప్ సమయాన్ని అందించండి."
+                    elif "hi" in logged_lang.lower():
+                        ai_response = "कृपया पिकअप का समय प्रदान करें।"
+                    else:
+                        ai_response = "Please provide the pickup time."
                 elif not pending_slots.get("package_weight"):
                     current_stage = "PICKUP_WAITING_FOR_WEIGHT"
                     if "te" in logged_lang.lower():
@@ -825,9 +935,9 @@ async def transcribe(
                     database.insert_new_order(
                         tracking_id=tracking_id,
                         p_addr=pending_slots["pickup_location"],
-                        d_addr="Delhi Hub",
+                        d_addr=pending_slots["drop_location"],
                         weight=pending_slots["package_weight"],
-                        p_time=pending_slots["delivery_date"]
+                        p_time=pending_slots["pickup_time"]
                     )
                     lang_key = get_language_from_code_or_name(logged_lang)
                     t = TRANSLATIONS[lang_key]
@@ -898,7 +1008,8 @@ async def transcribe(
                         user_text=transcript,
                         session_id=session_id,
                         context_data=context_data,
-                        mode=mode
+                        mode=mode,
+                        target_lang=logged_lang
                     )
                     ai_response = res_dict["ai_response"]
                     tool_calls = res_dict["tool_calls"]
@@ -978,7 +1089,8 @@ async def transcribe(
                     user_text=transcript,
                     session_id=session_id,
                     context_data=context_data,
-                    mode=mode
+                    mode=mode,
+                    target_lang=logged_lang
                 )
                 ai_response = res_dict["ai_response"]
                 tool_calls = res_dict["tool_calls"]
@@ -1110,4 +1222,46 @@ async def end_session(session_id: str = Form("default_session")):
         "ai_response": ai_response,
         "new_session_id": new_session_id
     }
+
+
+@app.post("/idle_warning")
+async def idle_warning(data: dict = Body(None)):
+    session_id = None
+    if data:
+        session_id = data.get("session_id")
+    
+    # Get active session language from database
+    lang = "English"
+    if session_id:
+        cached_lang = database.get_session_language(session_id)
+        if cached_lang:
+            # Standardize language
+            if "te" in cached_lang.lower() or "telugu" in cached_lang.lower():
+                lang = "Telugu"
+            elif "hi" in cached_lang.lower() or "hindi" in cached_lang.lower():
+                lang = "Hindi"
+
+    # Define warning phrases
+    warning_phrases = {
+        "English": "If you have no further queries, this session will automatically end in 30 seconds.",
+        "Telugu": "మీకు ఇకపై ఎటువంటి ప్రశ్నలు లేకపోతే, ఈ సెషన్ 30 సెకన్లలో ఆటోమేటిక్‌గా ముగిసిపోతుంది.",
+        "Hindi": "यदि आपके पास कोई अन्य प्रश्न नहीं है, तो यह सत्र 30 सेकंड में स्वतः समाप्त हो जाएगा।"
+    }
+    
+    warning_text = warning_phrases.get(lang, warning_phrases["English"])
+    
+    # Generate TTS audio b64
+    lang_code_map = {
+        "English": "en-IN",
+        "Telugu": "te-IN",
+        "Hindi": "hi-IN"
+    }
+    target_code = lang_code_map.get(lang, "en-IN")
+    audio_b64 = tts_service.generate_speech_b64(text=warning_text, target_language_code=target_code)
+    
+    return {
+        "response_text": warning_text,
+        "audio_b64": audio_b64
+    }
+
 

@@ -139,7 +139,8 @@ def insert_new_order(tracking_id: str, p_addr: str, d_addr: str, weight: str, p_
 
 def log_interaction(session_id: str, audio_file: str, transcript: str, response: str, lang: str, engine: str, latency: int, tracking_id: str = None):
     """
-    Writes a transaction entry to the conversation_logs table.
+    Writes a transaction entry to the conversation_logs table, propagating
+    the active session stage and slot values forward.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     t_id_ref = tracking_id.strip().upper() if tracking_id else None
@@ -148,12 +149,24 @@ def log_interaction(session_id: str, audio_file: str, transcript: str, response:
         conn = get_connection()
         cursor = conn.cursor()
         try:
+            # Query the latest active stage and slots to propagate state forward
+            cursor.execute("""
+                SELECT current_stage, pending_slots 
+                FROM conversation_logs 
+                WHERE session_id = ? 
+                ORDER BY id DESC LIMIT 1
+            """, (session_id,))
+            row = cursor.fetchone()
+            stage = row["current_stage"] if (row and row["current_stage"]) else "GREETING"
+            slots = row["pending_slots"] if (row and row["pending_slots"]) else "{}"
+
             cursor.execute("""
                 INSERT INTO conversation_logs (
                     session_id, timestamp, audio_filename, user_transcript,
-                    ai_response, detected_language, engine_used, api_latency_ms, tracking_id_ref
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (session_id, timestamp, audio_file, transcript, response, lang, engine, latency, t_id_ref))
+                    ai_response, detected_language, engine_used, api_latency_ms, tracking_id_ref,
+                    current_stage, pending_slots
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (session_id, timestamp, audio_file, transcript, response, lang, engine, latency, t_id_ref, stage, slots))
             conn.commit()
         except Exception as e:
             conn.rollback()

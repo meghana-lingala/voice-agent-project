@@ -63,7 +63,7 @@ class TestAppClient(unittest.TestCase):
             "transcript": "Test speech transcription.",
             "telemetry": {
                 "duration_seconds": 1.45,
-                "engine_used": "Groq"
+                "engine_used": "Sarvam"
             }
         }
         mock_post.return_value = mock_response
@@ -101,16 +101,33 @@ class TestAppClient(unittest.TestCase):
         mock_post.assert_called_once()
 
     @patch('app.time.time')
+    @patch('requests.post')
     @patch('app.audio_recorder.record_audio')
-    def test_main_loop_inactivity_warning(self, mock_record, mock_time):
+    def test_main_loop_inactivity_warning(self, mock_record, mock_post, mock_time):
         """Client triggers idle warnings on 30 seconds of inactivity."""
         start_time = 1000.0
-        mock_time.side_effect = [start_time, start_time + 35.0, start_time + 35.0, start_time + 35.0]
+        mock_time.side_effect = [
+            start_time,          # 1. last_interaction_time initialization
+            start_time,          # 2. First loop entry time check (elapsed check)
+            start_time + 35.0,   # 3. Second loop entry time check (triggers Warning)
+            start_time + 35.0,   # 4. last_interaction_time reset inside Warning
+            start_time + 35.0,   # 5. elapsed recalculation inside Warning
+            start_time + 35.0    # 6. extra safety padding
+        ]
         mock_record.side_effect = [TimeoutError("timeout"), KeyboardInterrupt()]
+        
+        # Mock /idle_warning endpoint response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "response_text": "If you have no further queries, this session will automatically end in 30 seconds.",
+            "audio_b64": "dummy_b64"
+        }
+        mock_post.return_value = mock_response
         
         app.main()
         
-        mock_record.assert_any_call(timeout=25.0)
+        mock_record.assert_any_call(timeout=30.0)
 
     @patch('app.time.time')
     @patch('requests.post')

@@ -7,15 +7,19 @@ import audio_recorder
 import uuid
 import time
 import base64
+import soundfile as sf
 import pygame
 import threading
 import collections
 import sounddevice as sd
 import numpy as np
+if sys.platform == "win32":
+    import winsound
 
 BACKEND_URL = "http://127.0.0.1:8000/transcribe"
 END_SESSION_URL = "http://127.0.0.1:8000/end_session"
 INITIATE_WORKFLOW_URL = "http://127.0.0.1:8000/initiate_workflow"
+IDLE_WARNING_URL = "http://127.0.0.1:8000/idle_warning"
 
 class PersistentAudioCapture:
     def __init__(self, samplerate=16000, channels=1, dtype='float32', blocksize=480, device=None):
@@ -102,7 +106,7 @@ def calculate_and_set_threshold(persistent_rec):
         noise_rms = audio_recorder.calculate_rms(flat)
         # Calculate dynamic threshold above background noise floor
         # Using NOISE_FLOOR_MULTIPLIER = 4.0 and MIN_ENERGY_THRESHOLD = 0.0008
-        energy_threshold = max(noise_rms * 4.0, 0.0008)
+        energy_threshold = min(max(noise_rms * 4.0, 0.0008), 0.0030)
     else:
         energy_threshold = 0.0008
         noise_rms = 0.0
@@ -119,18 +123,31 @@ def play_audio_response(audio_b64, persistent_rec):
         with open(output_active_path, "wb") as audio_file:
             audio_file.write(audio_bytes)
         
-        pygame.mixer.music.load(output_active_path)
-        pygame.mixer.music.play()
-        
-        # Continuously purge the queue during playback to avoid capturing echo
-        while pygame.mixer.music.get_busy():
-            if persistent_rec:
-                with persistent_rec.lock:
-                    persistent_rec.queue.clear()
-            time.sleep(0.05)
-            
-        pygame.mixer.music.stop()
-        pygame.mixer.music.unload()
+        # Clear persistent queue immediately before playing to avoid capturing playback echo
+        if persistent_rec:
+            with persistent_rec.lock:
+                persistent_rec.queue.clear()
+
+        import sys
+        if sys.platform == "win32":
+            # winsound.PlaySound is synchronous by default, which is perfect for blocking
+            # microphone capture during speech output (eliminating feedback/echo entirely)
+            winsound.PlaySound(output_active_path, winsound.SND_FILENAME)
+        else:
+            pygame.mixer.music.load(output_active_path)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                if persistent_rec:
+                    with persistent_rec.lock:
+                        persistent_rec.queue.clear()
+                time.sleep(0.05)
+            pygame.mixer.music.stop()
+            pygame.mixer.music.unload()
+
+        # Clear persistent queue again immediately after playing to discard any driver tail reverb
+        if persistent_rec:
+            with persistent_rec.lock:
+                persistent_rec.queue.clear()
     except Exception as play_err:
         print(f"[ERROR] Failed playing audio response: {play_err}")
 
@@ -139,8 +156,12 @@ def main():
     print("      Voice Agent Interactive STT Client Panel    ")
     print("==================================================")
     
-    # Initialize pygame mixer
-    pygame.mixer.init()
+    # Initialize pygame mixer only on non-Windows to avoid exclusive device locks on Windows
+    import sys
+    if sys.platform != "win32":
+        pygame.mixer.init()
+
+
     
     session_id = str(uuid.uuid4())
     print(f"[SYSTEM] Initialized unique Session ID: {session_id}")
@@ -220,10 +241,26 @@ def main():
                 
             # Stage 1: The Warning Prompt (30 Seconds of Inactivity)
             if elapsed > 30.0 and not warning_triggered:
-                print("[SYSTEM] Idle detected. Prompting user...")
-                print("Are you still there? Please let me know if you have any questions, otherwise I will close this session shortly.")
+                print("\n[SYSTEM] Idle detected. Prompting user...")
                 warning_triggered = True
-                # Recalculate elapsed after warning output
+                try:
+                    warn_resp = requests.post(IDLE_WARNING_URL, json={"session_id": session_id}, timeout=10)
+                    if warn_resp.status_code == 200:
+                        warn_data = warn_resp.json()
+                        warn_text = warn_data.get("response_text", "")
+                        print("\n==========================================")
+                        print("        TRANSCRIBE & AGENT SESSION        ")
+                        print("==========================================")
+                        print(f" Agent (AI)     : {warn_text}")
+                        print("==========================================\n")
+                        warn_audio = warn_data.get("audio_b64")
+                        if warn_audio:
+                            play_audio_response(warn_audio, persistent_rec)
+                except Exception as warn_err:
+                    print(f"[WARNING] Could not fetch idle warning from server: {warn_err}")
+                
+                # Recalculate interaction/elapsed times to account for warning playback duration
+                last_interaction_time = time.time() - 30.0
                 elapsed = time.time() - last_interaction_time
             
             print(f"\n[SYSTEM] Microphone is live... Speak now. (Session: {session_id})")
@@ -310,6 +347,35 @@ def main():
                         # Reset timeout state for the new session
                         last_interaction_time = time.time()
                         warning_triggered = False
+
+                        # --- Play greeting for the rotated session ---
+                        # Register the new session and fetch the welcome message,
+                        # exactly as on cold start, so the user hears the greeting.
+                        try:
+                            if persistent_rec:
+                                with persistent_rec.lock:
+                                    persistent_rec.queue.clear()
+                            greet_resp = requests.post(
+                                INITIATE_WORKFLOW_URL,
+                                json={"session_id": session_id},
+                                timeout=30
+                            )
+                            if greet_resp.status_code == 200:
+                                greet_data = greet_resp.json()
+                                greet_text = greet_data.get("response_text", "")
+                                print("\n==========================================")
+                                print("        TRANSCRIBE & AGENT SESSION        ")
+                                print("==========================================")
+                                print(f" Agent (AI)     : {greet_text}")
+                                print("==========================================\n")
+                                if persistent_rec:
+                                    calculate_and_set_threshold(persistent_rec)
+                                greet_audio = greet_data.get("audio_b64")
+                                if greet_audio:
+                                    play_audio_response(greet_audio, persistent_rec)
+                                time.sleep(0.5)
+                        except Exception as greet_err:
+                            print(f"[WARNING] Could not fetch greeting for new session: {greet_err}")
                 else:
                     try:
                         detail = response.json().get("detail", response.text)
