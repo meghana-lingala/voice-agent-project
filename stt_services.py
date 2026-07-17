@@ -19,7 +19,7 @@ sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY) if SARVAM_API_KEY 
 # ──────────────────────────────────────────────────────────────────────────────
 TELUGU_CONFIDENT_WORDS = frozenset({
     # Pronouns / postpositions
-    'నేను', 'మీరు', 'మీకు', 'నాకు', 'వారు', 'మనం', 'నాతో', 'మీతో',
+    'నేను', 'మీరు', 'మీకు', 'నాకు', 'నా', 'వారు', 'మనం', 'నాతో', 'మీతో',
     'నీకు', 'నీవు', 'వాళ్ళు', 'మాకు',
     # Core verbs / auxiliaries
     'ఉన్నాను', 'ఉన్నారు', 'ఉన్నాయి', 'ఉంది', 'ఉన్నది',
@@ -29,8 +29,9 @@ TELUGU_CONFIDENT_WORDS = frozenset({
     # Common nouns
     'ఇంట్లో', 'ఇల్లు', 'పేరు', 'తిండి', 'నీళ్ళు', 'డబ్బు', 'డబ్బులు',
     'కాస్త', 'కాస్తా',
-    # Conjunctions / particles
+    # Conjunctions / particles / greetings
     'కానీ', 'కూడా', 'చాలా', 'చాల', 'అయినా', 'అందుకే', 'అయితే', 'ఐతే',
+    'నమస్కారం', 'నమస్తే',
     # Question words
     'ఎలా', 'ఏమి', 'ఎంత', 'ఎక్కడ', 'ఎప్పుడు', 'ఎవరు', 'ఏదో',
     # Adjectives / other
@@ -62,26 +63,36 @@ HINDI_CONFIDENT_WORDS = frozenset({
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
+def _get_morpheme_score(text: str, confident_words: set) -> tuple:
+    """Returns (has_genuine, match_count, total_match_len)"""
+    if not text:
+        return False, 0, 0
+    words = [w.strip('.,!?:;()[]?') for w in text.split()]
+    unique_words = set(words)
+    matches = unique_words & confident_words
+    if not matches:
+        return False, 0, 0
+    
+    has_genuine = any(len(m) >= 5 for m in matches) or len(matches) >= 2
+    if not has_genuine:
+        return False, 0, 0
+        
+    match_count = sum(1 for w in words if w in confident_words)
+    total_match_len = sum(len(w) for w in words if w in confident_words)
+    
+    return True, match_count, total_match_len
+
+
 def _has_genuine_telugu(text: str) -> bool:
     """Return True if text contains authentic Telugu morphemes."""
-    if not text:
-        return False
-    words = {w.strip('.,!?:;()[]') for w in text.split()}
-    matches = words & TELUGU_CONFIDENT_WORDS
-    if not matches:
-        return False
-    return any(len(m) >= 5 for m in matches) or len(matches) >= 2
+    valid, _, _ = _get_morpheme_score(text, TELUGU_CONFIDENT_WORDS)
+    return valid
 
 
 def _has_genuine_hindi(text: str) -> bool:
     """Return True if text contains authentic Hindi morphemes."""
-    if not text:
-        return False
-    words = {w.strip('.,!?:;()[]') for w in text.split()}
-    matches = words & HINDI_CONFIDENT_WORDS
-    if not matches:
-        return False
-    return any(len(m) >= 5 for m in matches) or len(matches) >= 2
+    valid, _, _ = _get_morpheme_score(text, HINDI_CONFIDENT_WORDS)
+    return valid
 
 
 def _get_audio_duration(file_path: str) -> float:
@@ -200,9 +211,40 @@ def transcribe_auto(file_path: str) -> dict:
         except Exception as exc:
             print(f"[LID] Sarvam te-IN probe failed: {exc}")
 
-    # Decision: genuine morpheme matching
-    # Telugu checked first (more distinctive morphemes)
-    if te_text and _has_genuine_telugu(te_text):
+    # Decision: genuine morpheme matching with translation safety
+    te_valid, te_count, te_len = _get_morpheme_score(te_text, TELUGU_CONFIDENT_WORDS)
+    hi_valid, hi_count, hi_len = _get_morpheme_score(hi_text, HINDI_CONFIDENT_WORDS)
+
+    if te_valid and hi_valid:
+        # Both probes met the morpheme criteria (one of them is likely a translation)
+        # Select the one with the higher morpheme density/length
+        if hi_count > te_count:
+            use_hindi = True
+        elif te_count > hi_count:
+            use_hindi = False
+        else:
+            # Tie breaker: sum of character lengths of matching morphemes
+            use_hindi = (hi_len > te_len)
+            
+        if use_hindi:
+            return {
+                "transcript": hi_text,
+                "telemetry": {
+                    "duration_seconds" : hi_dur,
+                    "engine_used"      : "Sarvam",
+                    "detected_language": "Hindi",
+                },
+            }
+        else:
+            return {
+                "transcript": te_text,
+                "telemetry": {
+                    "duration_seconds" : te_dur,
+                    "engine_used"      : "Sarvam",
+                    "detected_language": "Telugu",
+                },
+            }
+    elif te_valid:
         return {
             "transcript": te_text,
             "telemetry": {
@@ -211,8 +253,7 @@ def transcribe_auto(file_path: str) -> dict:
                 "detected_language": "Telugu",
             },
         }
-
-    if hi_text and _has_genuine_hindi(hi_text):
+    elif hi_valid:
         return {
             "transcript": hi_text,
             "telemetry": {

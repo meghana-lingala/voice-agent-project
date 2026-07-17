@@ -173,6 +173,31 @@ class TestTranscribeAuto(unittest.TestCase):
         self.assertEqual(result["telemetry"]["detected_language"], "Hindi")
         self.assertEqual(result["transcript"], "मैं अपनी ऑर्डर कैंसिल करना चाहती हूँ")
 
+    @patch('stt_services.os.path.exists', return_value=True)
+    @patch('stt_services._sarvam_probe')
+    def test_hindi_telugu_disambiguation(self, mock_probe, _exists):
+        # Hindi spoken: Hindi probe has 8 matches, Telugu translation has 3 matches. Hindi wins.
+        mock_probe.side_effect = self._make_probe_side_effect(
+            en_text="Where is my order",
+            hi_text="मैं यह जानना चाहती हूँ कि मेरी ऑर्डर किधर है", # 8 matches
+            te_text="నేను ఇది తెలుసుకోవడానికి కావాలన్నా ఉంది నా ఆర్డర్ ఎక్కడ ఉంది", # 3 matches
+        )
+        with patch('builtins.open', mock_open(read_data=b"audio")):
+            result = stt_services.transcribe_auto("dummy.wav")
+        self.assertEqual(result["telemetry"]["detected_language"], "Hindi")
+        self.assertEqual(result["transcript"], "मैं यह जानना चाहती हूँ कि मेरी ऑर्डर किधर है")
+
+        # Telugu spoken: Telugu probe has 2 matches (len 9), Hindi translation has 2 matches (len 6). Telugu wins.
+        mock_probe.side_effect = self._make_probe_side_effect(
+            en_text="Hello, where is my order",
+            hi_text="नमस्कार, ना ऑर्डर कहाँ है", # 2 matches: कहाँ (4), है (2) -> len 6
+            te_text="నమస్కారం, నా ఆర్డర్ ఎక్కడ ఉంది", # 2 matches: ఎక్కడ (5), ఉంది (4) -> len 9
+        )
+        with patch('builtins.open', mock_open(read_data=b"audio")):
+            result = stt_services.transcribe_auto("dummy.wav")
+        self.assertEqual(result["telemetry"]["detected_language"], "Telugu")
+        self.assertEqual(result["transcript"], "నమస్కారం, నా ఆర్డర్ ఎక్కడ ఉంది")
+
     # ── All probes fail → empty string fallback ──
     @patch('stt_services.os.path.exists', return_value=True)
     @patch('stt_services._sarvam_probe')
