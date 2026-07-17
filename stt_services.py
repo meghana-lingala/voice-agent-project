@@ -41,14 +41,17 @@ TELUGU_CONFIDENT_WORDS = frozenset({
 })
 
 HINDI_CONFIDENT_WORDS = frozenset({
-    # Pronouns / postpositions
+    # Pronouns / postpositions / possessives
     'मैं', 'आप', 'हम', 'वो', 'यह', 'वह', 'तुम', 'मेरा', 'आपका',
-    'हमारा', 'मुझे', 'आपको', 'उसको', 'हमको',
-    # Core verbs / auxiliaries
-    'है', 'हैं', 'हो', 'था', 'थे', 'थी', 'हुआ', 'हुई',
-    # Common conjunctions / particles
+    'हमारा', 'मुझे', 'आपको', 'उसको', 'हमको', 'मेरी', 'मेरे', 
+    'अपनी', 'अपने', 'अपना', 'की', 'का', 'के', 'से', 'को', 'में', 'पर', 'ने',
+    # Core verbs / auxiliaries / modals
+    'है', 'हैं', 'हो', 'था', 'थे', 'थी', 'हुआ', 'हुई', 'हूँ', 
+    'चाहती', 'चाहता', 'चाहते', 'करना', 'कर', 'करो', 'करें', 'रद्द', 
+    'भेजना', 'भेज', 'पहुंचेगा', 'पहुंच',
+    # Common conjunctions / particles / question words
     'लेकिन', 'क्योंकि', 'भी', 'नहीं', 'ठीक', 'अच्छा',
-    'कैसे', 'क्यों', 'कब', 'कहां',
+    'कैसे', 'क्यों', 'कब', 'कहां', 'कहाँ', 'किधर', 'कि',
     # Greetings
     'नमस्ते', 'धन्यवाद',
     # Other unique Hindi

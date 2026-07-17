@@ -148,6 +148,31 @@ class TestTranscribeAuto(unittest.TestCase):
         self.assertEqual(result["telemetry"]["detected_language"], "Hindi")
         self.assertIn("नमस्ते", result["transcript"])
 
+    @patch('stt_services.os.path.exists', return_value=True)
+    @patch('stt_services._sarvam_probe')
+    def test_hindi_detection_user_phrases(self, mock_probe, _exists):
+        # 1. "मेरी ऑर्डर किधर है?"
+        mock_probe.side_effect = self._make_probe_side_effect(
+            en_text="Where is my order",
+            hi_text="मेरी ऑर्डर किधर है",  # genuine Hindi: मेरी, किधर, है
+            te_text="మేరి ఆర్డర్ కిధర్ హై",
+        )
+        with patch('builtins.open', mock_open(read_data=b"audio")):
+            result = stt_services.transcribe_auto("dummy.wav")
+        self.assertEqual(result["telemetry"]["detected_language"], "Hindi")
+        self.assertEqual(result["transcript"], "मेरी ऑर्डर किधर है")
+
+        # 2. "मैं अपनी ऑर्डर कैंसिल करना चाहती हूँ"
+        mock_probe.side_effect = self._make_probe_side_effect(
+            en_text="I want to cancel my order",
+            hi_text="मैं अपनी ऑर्डर कैंसिल करना चाहती हूँ",  # genuine Hindi: मैं, अपनी, करना, चाहती, हूँ
+            te_text="మై అప్ని ఆర్డర్ క్యాన్సిల్ కర్నా చాహ్తీ హూ",
+        )
+        with patch('builtins.open', mock_open(read_data=b"audio")):
+            result = stt_services.transcribe_auto("dummy.wav")
+        self.assertEqual(result["telemetry"]["detected_language"], "Hindi")
+        self.assertEqual(result["transcript"], "मैं अपनी ऑर्डर कैंसिल करना चाहती हूँ")
+
     # ── All probes fail → empty string fallback ──
     @patch('stt_services.os.path.exists', return_value=True)
     @patch('stt_services._sarvam_probe')
